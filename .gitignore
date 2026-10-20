@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Data, checkpoints, caches (великі файли не комітимо)
+/data/
+/datasets/
+/checkpoints/
+/pretrained/
+*.pth
+*.pt
+*.ckpt
+*.npy
+*.npz
+*.h5
+cache/
+embeddings/
+
+# Results: комітимо лише маленькі csv/json
+results/**
+!results/
+!results/**/
+!results/**/*.csv
+!results/**/*.json
+!results/.gitkeep
+
+# Logs
+logs/
+wandb/
+runs/
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

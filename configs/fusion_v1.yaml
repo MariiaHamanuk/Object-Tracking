@@ -1,0 +1,20 @@
+# Fusion v1: OSTrack + ембединги V-JEPA
+experiment: fusion_v1
+tracker:
+  name: ostrack
+  config: vitb_256_mae_ce_32x4_ep300
+  checkpoint: null
+data:
+  dataset: lasot
+  root: null
+  split: test
+  categories: []
+vjepa:
+  enabled: true
+  encoder: vit_large
+  checkpoint: null
+  cache_dir: null   # кеш ембедингів (не комітиться)
+  fusion: null      # TODO: описати спосіб злиття
+eval:
+  metrics: [auc, precision, norm_precision, occlusion_recovery_rate]
+output_dir: results/fusion_v1

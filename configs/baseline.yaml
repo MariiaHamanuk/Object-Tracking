@@ -1,0 +1,16 @@
+# Baseline: чистий OSTrack без V-JEPA
+experiment: baseline
+tracker:
+  name: ostrack
+  config: vitb_256_mae_ce_32x4_ep300
+  checkpoint: null  # шлях до ваг OSTrack
+data:
+  dataset: lasot
+  root: null        # шлях до LaSOT
+  split: test
+  categories: []    # порожньо = всі
+vjepa:
+  enabled: false
+eval:
+  metrics: [auc, precision, norm_precision, occlusion_recovery_rate]
+output_dir: results/baseline

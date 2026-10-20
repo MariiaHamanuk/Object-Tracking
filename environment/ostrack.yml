@@ -1,0 +1,18 @@
+name: ostrack
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.8
+  - pip
+  - pip:
+      # TODO: узгодити з baselines/OSTrack/install.sh
+      - torch
+      - torchvision
+      - opencv-python
+      - pyyaml
+      - easydict
+      - timm
+      - tqdm
+      - pandas
