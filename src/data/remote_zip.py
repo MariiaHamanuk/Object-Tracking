@@ -6,6 +6,8 @@ annotations) can be pulled out of a 2-4 GB class archive.
 from __future__ import annotations
 
 import io
+import queue
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -82,6 +84,41 @@ def frame_names(z: zipfile.ZipFile, seq: str) -> list[str]:
                   if n.startswith(f"{seq}/img/") and n.lower().endswith(".jpg"))
 
 
+def _prefetch(z: zipfile.ZipFile, infos: list[zipfile.ZipInfo]):
+    # a video's frames are stored contiguously: one range request instead of thousands
+    first = min(i.header_offset for i in infos)
+    last = max(i.header_offset + 30 + len(i.orig_filename.encode()) + len(i.extra) + i.compress_size for i in infos)
+    z.fp.prefetch(first, last + 1024)  # margin for local-header extras that differ from the central dir
+
+
+def extract_frames(z: zipfile.ZipFile, seq: str, indices, out_dir: Path) -> Path:
+    """Write only the given 0-based frames of one video (plus annotations) to out_dir/<seq>/.
+    Frames already on disk are skipped; nearby indices are fetched with a single range request."""
+    seq_dir = Path(out_dir) / seq
+    (seq_dir / "img").mkdir(parents=True, exist_ok=True)
+    names = frame_names(z, seq)
+    for f in ANNOT_FILES:
+        if not (seq_dir / f).exists() and f"{seq}/{f}" in z.NameToInfo:
+            (seq_dir / f).write_bytes(z.read(f"{seq}/{f}"))
+    todo = sorted({int(i) for i in indices if 0 <= i < len(names)})
+    todo = [i for i in todo if not (seq_dir / "img" / names[i].rsplit("/", 1)[1]).exists()]
+    # group into chunks of nearby frames so one far-away frame does not drag in the whole video
+    chunks, cur = [], []
+    for i in todo:
+        if cur and i - cur[-1] > 64:
+            chunks.append(cur)
+            cur = []
+        cur.append(i)
+    if cur:
+        chunks.append(cur)
+    for chunk in chunks:
+        infos = [z.getinfo(names[i]) for i in chunk]
+        _prefetch(z, infos)
+        for i in infos:
+            (seq_dir / "img" / i.filename.rsplit("/", 1)[1]).write_bytes(z.read(i))
+    return seq_dir
+
+
 def extract_sequence(z: zipfile.ZipFile, seq: str, out_dir: Path) -> Path:
     """Write annotations and all frames of one video to out_dir/<seq>/ (frames fetched in one request)."""
     seq_dir = Path(out_dir) / seq
@@ -92,11 +129,28 @@ def extract_sequence(z: zipfile.ZipFile, seq: str, out_dir: Path) -> Path:
             (seq_dir / f).write_bytes(z.read(f"{seq}/{f}"))
     infos = [z.getinfo(n) for n in frame_names(z, seq)]
     if infos:
-        # a video's frames are stored contiguously: one range request instead of thousands
-        first = min(i.header_offset for i in infos)
-        last = max(i.header_offset + 30 + len(i.orig_filename.encode()) + len(i.extra) + i.compress_size
-                   for i in infos)
-        z.fp.prefetch(first, last + 1024)  # margin for local-header extras that differ from the central dir
+        _prefetch(z, infos)
         for i in infos:
             (seq_dir / "img" / i.filename.rsplit("/", 1)[1]).write_bytes(z.read(i))
     return seq_dir
+
+
+def stream_sequences(seqs: list[str], work: Path, ahead: int = 2):
+    """Yield (seq, seq_dir, error) while the next videos download in a background thread.
+    At most `ahead` finished videos wait on disk; the consumer deletes each one when done."""
+    q: queue.Queue = queue.Queue(maxsize=ahead)
+
+    def producer():
+        zips = {}
+        for seq in seqs:
+            cls = seq.rsplit("-", 1)[0]
+            try:
+                if cls not in zips:
+                    zips = {cls: open_class_zip(cls)}  # keep one archive index in memory
+                q.put((seq, extract_sequence(zips[cls], seq, work), None))
+            except Exception as e:  # report and move on; a re-run retries it
+                q.put((seq, None, e))
+        q.put(None)
+
+    threading.Thread(target=producer, daemon=True).start()
+    yield from iter(q.get, None)

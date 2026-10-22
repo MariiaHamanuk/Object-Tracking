@@ -13,10 +13,8 @@ Writes <out>/<seq>.txt (x y w h per frame), <seq>_score.txt (confidence) and <se
 from __future__ import annotations
 
 import argparse
-import queue
 import shutil
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -25,28 +23,13 @@ import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-from src.data.remote_zip import HF_FILE, extract_sequence, open_class_zip, retry  # noqa: E402
+from src.data.remote_zip import HF_FILE, retry, stream_sequences  # noqa: E402
 from src.tracker.ostrack import DEFAULT_CONFIG, OSTrackRunner  # noqa: E402
 
 
 def test_sequences() -> list[str]:
     text = retry(lambda: requests.get(HF_FILE.format("testing_set.txt"), timeout=60)).text
     return [s.strip() for s in text.splitlines() if s.strip()]
-
-
-def downloader(seqs: list[str], work: Path, q: queue.Queue):
-    """Producer: extract videos one by one into work/ and hand them to the tracker."""
-    zips = {}
-    for seq in seqs:
-        cls = seq.rsplit("-", 1)[0]
-        try:
-            if cls not in zips:
-                zips.clear()  # test videos are grouped by class: keep one archive index in memory
-                zips[cls] = open_class_zip(cls)
-            q.put((seq, extract_sequence(zips[cls], seq, work), None))
-        except Exception as e:  # report and move on; a re-run retries it
-            q.put((seq, None, e))
-    q.put(None)
 
 
 def load_box_file(path: Path) -> np.ndarray:
@@ -76,13 +59,8 @@ def main():
         return
 
     runner = OSTrackRunner(a.checkpoint, a.config, save_dir=a.work / "ostrack_output")
-    work = a.work / f"shard{a.shard}"
-    q: queue.Queue = queue.Queue(maxsize=2)  # at most ~2 videos waiting on disk
-    threading.Thread(target=downloader, args=(todo, work, q), daemon=True).start()
-
     t0, n_frames, failed = time.time(), 0, []
-    for k, item in enumerate(iter(q.get, None), 1):
-        seq, seq_dir, err = item
+    for k, (seq, seq_dir, err) in enumerate(stream_sequences(todo, a.work / f"shard{a.shard}"), 1):
         if err is not None:
             failed.append(seq)
             print(f"[{k}/{len(todo)}] {seq}: download FAILED ({err})", flush=True)
