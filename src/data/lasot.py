@@ -115,8 +115,8 @@ def load_sequence(seq_dir: Path, read_image_size: bool = True) -> Sequence:
     s = Sequence(cls, seq_dir.name, seq_dir, boxes, foc, oov, nlp, n_images, size, issues)
     if (s.present & ~s.valid_box).any():
         s.issues.append(f"{int((s.present & ~s.valid_box).sum())} 'present' frames with empty box")
-    if (s.absent & (boxes[:, 2] * boxes[:, 3] > 0)).any():
-        s.issues.append(f"{int((s.absent & (boxes[:, 2] * boxes[:, 3] > 0)).sum())} absent frames with non-empty box")
+    # Not an issue: LaSOT keeps a non-empty box on ~73% of absent frames. Absent
+    # frames are excluded via `absent`/`valid_box`, and the OSTrack protocol does the same.
     return s
 
 

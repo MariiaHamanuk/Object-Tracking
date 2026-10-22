@@ -1,0 +1,71 @@
+{
+  "results": "data\\raw_results\\ostrack_official\\lasot",
+  "split": "C:\\Users\\Mariia Hamaniuk\\Desktop\\jepa\\Object-Tracking\\data\\testing_set.txt",
+  "window": 30,
+  "iou_thr": 0.5,
+  "lock_window": 10,
+  "overall": {
+    "AUC": 69.10872584002193,
+    "OP50": 80.30383444984903,
+    "OP75": 68.37407913438504,
+    "Precision": 75.21923648653556,
+    "NormPrecision": 78.68073174161452,
+    "n_sequences": 280
+  },
+  "videos_with_absence": {
+    "AUC": 62.31055182455655,
+    "OP50": 73.20601903174155,
+    "OP75": 59.66524306443588,
+    "Precision": 69.17156970968715,
+    "NormPrecision": 71.18321600069191,
+    "n_sequences": 164
+  },
+  "videos_without_absence": {
+    "AUC": 78.71993737912815,
+    "OP50": 90.33867693751819,
+    "OP75": 80.68657150914069,
+    "Precision": 83.76938606759707,
+    "NormPrecision": 89.28066778912569,
+    "n_sequences": 116
+  },
+  "occlusion": {
+    "n_episodes": 902,
+    "n_locked_before": 501,
+    "ORR": 72.2554890219561,
+    "ORR_all": 51.66297117516629,
+    "median_frames_to_recover": 2.0,
+    "mean_iou_after": 48.31451430503298,
+    "ORR_by_length": {
+      "1-5": {
+        "n": 216,
+        "ORR": 81.48148148148148
+      },
+      "6-30": {
+        "n": 191,
+        "ORR": 72.77486910994764
+      },
+      "31-150": {
+        "n": 83,
+        "ORR": 50.602409638554214
+      },
+      ">150": {
+        "n": 11,
+        "ORR": 45.45454545454545
+      }
+    },
+    "ORR_by_kind": {
+      "both": {
+        "n": 14,
+        "ORR": 64.28571428571429
+      },
+      "full_occlusion": {
+        "n": 282,
+        "ORR": 72.69503546099291
+      },
+      "out_of_view": {
+        "n": 205,
+        "ORR": 72.1951219512195
+      }
+    }
+  }
+}

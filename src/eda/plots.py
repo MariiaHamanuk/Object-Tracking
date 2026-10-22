@@ -21,64 +21,111 @@ def _finish(fig, save):
     return fig
 
 
+MAX_OVERLAID = 8  # with more classes, per-class overlays become unreadable -> pool or sort instead
+
+
 def _classes(df):
     return list(dict.fromkeys(df.cls))
+
+
+def _class_ticks(ax, labels, axis="x"):
+    getattr(ax, f"set_{axis}ticks")(range(len(labels)))
+    getattr(ax, f"set_{axis}ticklabels")(labels, fontsize=7 if len(labels) > 20 else 9,
+                                         rotation=90 if axis == "x" and len(labels) > 8 else 0)
 
 
 # --------------------------------------------------------------------------- size / aspect
 def plot_size_aspect(frames: pd.DataFrame, save=None):
     f = frames.dropna(subset=["rel_area"])
-    fig, ax = plt.subplots(1, 3, figsize=(15, 4))
-    for c in _classes(f):
-        d = f[f.cls == c]
+    cls = _classes(f)
+    fig, ax = plt.subplots(1, 3, figsize=(16, 4.5), gridspec_kw=dict(width_ratios=[1, 1, 2]))
+    groups = [(c, f[f.cls == c]) for c in cls] if len(cls) <= MAX_OVERLAID else [("all classes", f)]
+    for c, d in groups:
         ax[0].hist(np.log10(d.rel_area), bins=60, alpha=0.5, density=True, label=c)
         ax[1].hist(np.log2(d.aspect), bins=60, alpha=0.5, density=True, label=c)
     ax[0].set(xlabel="log10(box area / frame area)", ylabel="density", title="Relative target size")
     ax[1].set(xlabel="log2(w / h)   (0 = square)", title="Aspect ratio")
     ax[1].axvline(0, color="k", lw=0.5)
     per_seq = f.groupby(["cls", "seq"]).rel_area.median().reset_index()
-    ax[2].boxplot([np.log10(per_seq[per_seq.cls == c].rel_area) for c in _classes(f)], tick_labels=_classes(f))
-    ax[2].set(ylabel="log10(median rel. area)", title="Per-sequence median size")
-    ax[0].legend()
+    order = per_seq.groupby("cls").rel_area.median().sort_values().index.tolist()
+    ax[2].boxplot([np.log10(per_seq[per_seq.cls == c].rel_area) for c in order])
+    _class_ticks(ax[2], order)
+    ax[2].set(ylabel="log10(median rel. area)", title="Per-video median size, classes sorted")
+    ax[0].legend(fontsize=8)
     return _finish(fig, save)
 
 
 # --------------------------------------------------------------------------- absence
 def plot_absence(seqs_df: pd.DataFrame, save=None):
-    d = seqs_df.sort_values(["cls", "frac_absent"], ascending=[True, False]).reset_index(drop=True)
-    fig, ax = plt.subplots(1, 2, figsize=(15, 4), gridspec_kw=dict(width_ratios=[3, 1]))
+    many = len(seqs_df) > 60
+    d = seqs_df.sort_values("frac_absent" if many else ["cls", "frac_absent"], ascending=False).reset_index(drop=True)
+    fig, ax = plt.subplots(1, 2, figsize=(16, 4.5), gridspec_kw=dict(width_ratios=[1, 2]))
     xs = np.arange(len(d))
-    ax[0].bar(xs, d.frac_foc, label="full occlusion", color="tab:red")
-    ax[0].bar(xs, d.frac_oov, bottom=d.frac_foc, label="out of view", color="tab:blue")
-    ax[0].set(xticks=xs, xticklabels=d.seq, ylabel="fraction of frames", title="Absent frames per sequence")
-    ax[0].tick_params(axis="x", rotation=90, labelsize=7)
+    ax[0].bar(xs, d.frac_foc, width=1.0, label="full occlusion", color="tab:red")
+    ax[0].bar(xs, d.frac_oov, width=1.0, bottom=d.frac_foc, label="out of view", color="tab:blue")
+    if many:
+        ax[0].set(xlabel=f"video, sorted ({(d.frac_absent > 0).mean():.0%} have absent frames)")
+    else:
+        ax[0].set(xticks=xs, xticklabels=d.seq)
+        ax[0].tick_params(axis="x", rotation=90, labelsize=7)
+    ax[0].set(ylabel="fraction of frames", title="Absent frames per video")
     ax[0].legend()
-    cls = _classes(d)
-    w = 0.38
-    for i, (col, lab, colr) in enumerate([("frac_foc", "full occlusion", "tab:red"), ("frac_oov", "out of view", "tab:blue")]):
-        ax[1].bar(np.arange(len(cls)) + (i - .5) * w, [d[d.cls == c][col].mean() for c in cls], w, label=lab, color=colr)
-    ax[1].set(xticks=range(len(cls)), xticklabels=cls, title="Mean per class")
+    per_cls = d.groupby("cls")[["frac_foc", "frac_oov"]].mean()
+    per_cls = per_cls.loc[per_cls.sum(1).sort_values(ascending=False).index]
+    ax[1].bar(range(len(per_cls)), per_cls.frac_foc, color="tab:red")
+    ax[1].bar(range(len(per_cls)), per_cls.frac_oov, bottom=per_cls.frac_foc, color="tab:blue")
+    _class_ticks(ax[1], per_cls.index.tolist())
+    ax[1].set(title="Mean per class, sorted")
     return _finish(fig, save)
 
 
 # --------------------------------------------------------------------------- length / resolution
 def plot_length_resolution(seqs_df: pd.DataFrame, save=None):
     fig, ax = plt.subplots(1, 2, figsize=(12, 4))
-    for c in _classes(seqs_df):
-        ax[0].hist(seqs_df[seqs_df.cls == c].n_frames, bins=20, alpha=0.5, label=c)
+    cls = _classes(seqs_df)
+    groups = [(c, seqs_df[seqs_df.cls == c]) for c in cls] if len(cls) <= MAX_OVERLAID else [("all", seqs_df)]
+    for c, d in groups:
+        ax[0].hist(d.n_frames, bins=40, alpha=0.5, label=c)
     ax[0].set(xlabel="frames per video", ylabel="# videos", title="Video length")
-    ax[0].legend()
-    vc = seqs_df.groupby(["cls", "resolution"]).size().unstack(0).fillna(0).astype(int)
-    vc.plot.barh(ax=ax[1], stacked=True)
-    ax[1].set(xlabel="# videos", title="Resolution")
+    ax[0].legend(fontsize=8)
+    seqs_df.resolution.value_counts().head(12).sort_values().plot.barh(ax=ax[1])
+    ax[1].set(xlabel="# videos", title=f"Resolution (top 12 of {seqs_df.resolution.nunique()})")
     return _finish(fig, save)
 
 
 # --------------------------------------------------------------------------- attributes
 def plot_attribute_counts(attr_counts: pd.DataFrame, title="Videos per attribute", save=None):
     fig, ax = plt.subplots(figsize=(10, 4))
-    attr_counts.T.plot.bar(ax=ax)
+    if len(attr_counts) <= MAX_OVERLAID:
+        attr_counts.T.plot.bar(ax=ax)
+    else:
+        attr_counts.sum().sort_values(ascending=False).plot.bar(ax=ax)
+        title += f" (all {len(attr_counts)} classes)"
     ax.set(ylabel="# videos", title=title)
+    return _finish(fig, save)
+
+
+def plot_split_attributes(prev: pd.DataFrame, save=None):
+    """Attribute prevalence (% of videos) in train vs test; `prev` from stats.split_attribute_prevalence."""
+    fig, ax = plt.subplots(figsize=(10, 4))
+    prev[["train", "test"]].plot.bar(ax=ax)
+    ax.set(ylabel="% of videos", title="Attribute prevalence: train vs test")
+    return _finish(fig, save)
+
+
+def plot_reappearance(re: pd.DataFrame, save=None):
+    """Where and how big the target is when it comes back; `re` from stats.reappearance_table."""
+    fig, ax = plt.subplots(1, 3, figsize=(16, 4))
+    ax[0].hist(np.log10(re.length), bins=40, color="gray")
+    ax[0].set(xlabel="log10(episode length, frames)", ylabel="# episodes", title="Absence length")
+    b = re.groupby("length_bin", observed=True).disp.median()
+    ax[1].bar(b.index.astype(str), b.values)
+    ax[1].set(xlabel="episode length (frames)", ylabel="median displacement (box sizes)",
+              title="How far from where it vanished")
+    ax[2].hist(np.log2(re.scale.clip(1 / 16, 16)), bins=40, color="tab:purple")
+    ax[2].axvline(-1, color="k", ls="--", lw=0.8)
+    ax[2].axvline(1, color="k", ls="--", lw=0.8)
+    ax[2].set(xlabel="log2(area after / area before)", title="Size change across the episode")
     return _finish(fig, save)
 
 

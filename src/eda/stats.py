@@ -150,6 +150,48 @@ def temporal_density(seqs: list[Sequence], kind: str = "full_occ", bins: int = 5
     return pd.DataFrame(rows, index=names, columns=np.linspace(0, 1, bins, endpoint=False))
 
 
+REAPPEAR_BINS = [0, 5, 30, 150, np.inf]
+REAPPEAR_LABELS = ["1-5", "6-30", "31-150", ">150"]
+
+
+def reappearance_table(seqs: list[Sequence]) -> pd.DataFrame:
+    """One row per absence episode the target comes back from: how far (in box sizes) and how much
+    bigger/smaller it is on the first visible frame compared with the last one before it vanished.
+    This is what a tracker searching only near the last position has to cope with."""
+    rows = []
+    for s in seqs:
+        starts, lengths = runs(s.absent)
+        for a, l in zip(starts, lengths):
+            b, e = a - 1, a + l
+            if b < 0 or e >= s.n_frames or not (s.valid_box[b] and s.valid_box[e]):
+                continue
+            x0, y0, w0, h0 = s.boxes[b]
+            x1, y1, w1, h1 = s.boxes[e]
+            rows.append(dict(cls=s.cls, seq=s.name, start=int(a), length=int(l),
+                             disp=np.hypot(x1 + w1 / 2 - x0 - w0 / 2, y1 + h1 / 2 - y0 - h0 / 2) / np.sqrt(w0 * h0),
+                             scale=(w1 * h1) / (w0 * h0)))
+    df = pd.DataFrame(rows, columns=["cls", "seq", "start", "length", "disp", "scale"])
+    df["length_bin"] = pd.cut(df.length, REAPPEAR_BINS, labels=REAPPEAR_LABELS)
+    return df
+
+
+def split_attribute_prevalence(attr: pd.DataFrame, test_names: set[str]) -> pd.DataFrame:
+    """% of videos with each attribute in train vs test (are the 280 test videos representative?)."""
+    a = attr.drop(columns="cls").astype(bool)
+    is_test = a.index.isin(test_names)
+    out = pd.DataFrame({"train": a[~is_test].mean() * 100, "test": a[is_test].mean() * 100})
+    out["diff"] = out.test - out.train
+    return out.round(1)
+
+
+def split_summary(seqs_df: pd.DataFrame, test_names: set[str]) -> pd.DataFrame:
+    d = seqs_df.assign(split=np.where(seqs_df.seq.isin(test_names), "test", "train"))
+    return d.groupby("split").agg(videos=("seq", "size"), mean_frames=("n_frames", "mean"),
+                                  frac_absent=("frac_absent", "mean"),
+                                  pct_with_absence=("frac_absent", lambda x: 100 * (x > 0).mean()),
+                                  foc_episodes=("n_foc_episodes", "mean"), oov_episodes=("n_oov_episodes", "mean"))
+
+
 def episodes_table(seqs: list[Sequence]) -> pd.DataFrame:
     rows = []
     for s in seqs:
