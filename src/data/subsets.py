@@ -19,6 +19,13 @@ def occlusion_profile(seqs: list[Sequence], min_len: int = 6) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def train_subset(profile: pd.DataFrame, per_class: int = 4) -> pd.DataFrame:
+    """Class-balanced training subset (proposal §3): `per_class` videos per class, preferring videos with
+    occlusions (the fusion has to learn from them) but keeping occlusion-free ones when a class has few."""
+    ranked = profile.sort_values(["n_long", "n_episodes", "frac_absent"], ascending=False)
+    return ranked.groupby("cls").head(per_class).sort_values("seq", key=lambda s: s.str.lower())
+
+
 def dev_occlusion_subset(profile: pd.DataFrame, n: int = 40, max_per_class: int = 1) -> pd.DataFrame:
     """Most occlusion-dense videos, at most `max_per_class` per class so categories stay balanced.
     Ranked by episodes >= 1 s, then episodes >= min_len, then fraction of absent frames."""

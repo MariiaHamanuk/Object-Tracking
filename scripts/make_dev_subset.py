@@ -1,7 +1,7 @@
-"""Pick the development subset: occlusion-dense test videos, balanced over classes.
+"""Pick the video subsets used during development.
 
-    python scripts/make_dev_subset.py            # -> configs/splits/dev_occlusion.txt (40 videos)
-    python scripts/make_dev_subset.py --n 30 --max-per-class 1
+    python scripts/make_dev_subset.py                    # test videos, occlusion-dense -> configs/splits/dev_occlusion.txt
+    python scripts/make_dev_subset.py --split train      # 4 train videos per class -> configs/splits/train_fusion.txt
 """
 from __future__ import annotations
 
@@ -13,27 +13,37 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 from src import config as C  # noqa: E402
 from src.data.lasot import load_sequence, read_split  # noqa: E402
-from src.data.subsets import dev_occlusion_subset, occlusion_profile  # noqa: E402
+from src.data.subsets import dev_occlusion_subset, occlusion_profile, train_subset  # noqa: E402
+
+SPLITS = REPO_ROOT / "configs" / "splits"
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--n", type=int, default=40)
-    p.add_argument("--max-per-class", type=int, default=1)
-    p.add_argument("--out", type=Path, default=REPO_ROOT / "configs" / "splits" / "dev_occlusion.txt")
+    p.add_argument("--split", choices=["test", "train"], default="test")
+    p.add_argument("--n", type=int, default=40, help="test: number of videos")
+    p.add_argument("--max-per-class", type=int, default=1, help="test: videos per class")
+    p.add_argument("--per-class", type=int, default=4, help="train: videos per class")
+    p.add_argument("--out", type=Path, default=None)
     a = p.parse_args()
 
-    test = sorted(read_split(C.SPLIT_FILE))
-    seqs = [load_sequence(C.DATA_ROOT / s.rsplit("-", 1)[0] / s, read_image_size=False) for s in test]
+    split_file = C.SPLIT_FILE if a.split == "test" else C.DATA_ROOT / "training_set.txt"
+    names = sorted(read_split(split_file))
+    seqs = [load_sequence(C.DATA_ROOT / s.rsplit("-", 1)[0] / s, read_image_size=False) for s in names]
     prof = occlusion_profile(seqs)
-    dev = dev_occlusion_subset(prof, a.n, a.max_per_class)
+    if a.split == "test":
+        sub = dev_occlusion_subset(prof, a.n, a.max_per_class)
+        out = a.out or SPLITS / "dev_occlusion.txt"
+    else:
+        sub = train_subset(prof, a.per_class)
+        out = a.out or SPLITS / "train_fusion.txt"
 
-    a.out.parent.mkdir(parents=True, exist_ok=True)
-    a.out.write_text("\n".join(dev.seq) + "\n")
-    print(f"{len(dev)} videos -> {a.out}")
-    print(f"frames: {dev.n_frames.sum()} ({dev.n_frames.sum() / prof.n_frames.sum():.0%} of test)")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(sub.seq) + "\n")
+    print(f"{len(sub)} videos ({sub.cls.nunique()} classes) -> {out}")
+    print(f"frames: {sub.n_frames.sum()} ({sub.n_frames.sum() / prof.n_frames.sum():.0%} of {a.split})")
     for col in ("n_episodes", "n_long", "n_very_long"):
-        print(f"{col}: {dev[col].sum()} of {prof[col].sum()} in test ({dev[col].sum() / prof[col].sum():.0%})")
+        print(f"{col}: {sub[col].sum()} of {prof[col].sum()} in {a.split} ({sub[col].sum() / prof[col].sum():.0%})")
 
 
 if __name__ == "__main__":
