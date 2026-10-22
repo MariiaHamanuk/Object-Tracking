@@ -38,6 +38,19 @@ conda env create -f environment/ostrack.yml
 conda env create -f environment/vjepa.yml
 ```
 
+### EDA
+
+EDA не потребує кадрів, тож 230 ГБ качати не треба. Скрипт читає zip-архіви з HuggingFace частинами
+і забирає лише анотації, кілька кадрів на відео, кількість кадрів, split і офіційні атрибути
+(~300 МБ на весь LaSOT, ~20–30 хв):
+
+```bash
+python scripts/fetch_lasot_annotations.py        # усі 70 класів -> ./data (або $LASOT_ROOT)
+# потім відкрити src/eda/eda_lasot.ipynb
+```
+
+Повторний запуск пропускає вже завантажені класи.
+
 <!-- TODO: команди для запуску baseline / fusion -->
 
 ## Результати

@@ -19,6 +19,8 @@ venv/
 *.h5
 cache/
 embeddings/
+/tmp_frames/
+/output/
 
 # Results: комітимо лише маленькі csv/json
 results/**
@@ -26,6 +28,7 @@ results/**
 !results/**/
 !results/**/*.csv
 !results/**/*.json
+!results/**/*.md
 !results/.gitkeep
 
 # Logs

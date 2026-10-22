@@ -2,7 +2,10 @@ import torch
 import torch.utils.data.dataloader
 import importlib
 import collections
-from torch._six import string_classes
+try:
+    from torch._six import string_classes
+except ImportError:  # torch >= 2.0 removed torch._six
+    string_classes = str
 from lib.utils import TensorDict, TensorList
 
 if float(torch.__version__[:3]) >= 1.9 or len('.'.join((torch.__version__).split('.')[0:2])) > 3:

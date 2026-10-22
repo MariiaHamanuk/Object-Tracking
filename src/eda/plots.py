@@ -37,7 +37,7 @@ def plot_size_aspect(frames: pd.DataFrame, save=None):
     ax[1].set(xlabel="log2(w / h)   (0 = square)", title="Aspect ratio")
     ax[1].axvline(0, color="k", lw=0.5)
     per_seq = f.groupby(["cls", "seq"]).rel_area.median().reset_index()
-    ax[2].boxplot([np.log10(per_seq[per_seq.cls == c].rel_area) for c in _classes(f)], labels=_classes(f))
+    ax[2].boxplot([np.log10(per_seq[per_seq.cls == c].rel_area) for c in _classes(f)], tick_labels=_classes(f))
     ax[2].set(ylabel="log10(median rel. area)", title="Per-sequence median size")
     ax[0].legend()
     return _finish(fig, save)
@@ -131,7 +131,9 @@ def show_samples(seq, n=4, save=None):
     idx = np.linspace(0, seq.n_frames - 1, n).astype(int)
     fig, ax = plt.subplots(1, n, figsize=(4 * n, 3.5))
     for a, i in zip(np.atleast_1d(ax), idx):
-        a.imshow(Image.open(imgs[min(i, len(imgs) - 1)]))  # min() only guards truncated test data
+        # LaSOT frames are 00000001.jpg, ...; with only sampled frames on disk, pick by name
+        img = seq.path / "img" / f"{i + 1:08d}.jpg"
+        a.imshow(Image.open(img if img.exists() else imgs[min(i, len(imgs) - 1)]))
         x, y, w, h = seq.boxes[i]
         if w > 0 and h > 0:
             a.add_patch(plt.Rectangle((x, y), w, h, fill=False, ec="lime", lw=2))

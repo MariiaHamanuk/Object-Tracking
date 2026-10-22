@@ -96,20 +96,23 @@ def load_sequence(seq_dir: Path, read_image_size: bool = True) -> Sequence:
     if read_image_size and imgs:
         with Image.open(imgs[0]) as im:
             size = im.size  # (W, H)
+    # scripts/fetch_lasot_annotations.py keeps only a few frames and stores the real count here
+    count_file = seq_dir / "n_images.txt"
+    n_images = int(count_file.read_text()) if count_file.exists() else len(imgs)
 
     issues = []
     n = len(boxes)
     if len(foc) != n or len(oov) != n:
         issues.append(f"length mismatch: boxes={n} foc={len(foc)} oov={len(oov)}")
-    if imgs and len(imgs) != n:
-        issues.append(f"images={len(imgs)} != boxes={n}")
+    if n_images and n_images != n:
+        issues.append(f"images={n_images} != boxes={n}")
     if boxes.shape[1] != 4:
         issues.append(f"boxes have {boxes.shape[1]} columns")
     # align flag lengths so downstream code does not crash; the issue stays recorded
     foc = np.resize(foc, n) if len(foc) != n else foc
     oov = np.resize(oov, n) if len(oov) != n else oov
 
-    s = Sequence(cls, seq_dir.name, seq_dir, boxes, foc, oov, nlp, len(imgs), size, issues)
+    s = Sequence(cls, seq_dir.name, seq_dir, boxes, foc, oov, nlp, n_images, size, issues)
     if (s.present & ~s.valid_box).any():
         s.issues.append(f"{int((s.present & ~s.valid_box).sum())} 'present' frames with empty box")
     if (s.absent & (boxes[:, 2] * boxes[:, 3] > 0)).any():

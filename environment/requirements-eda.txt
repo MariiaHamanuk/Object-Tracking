@@ -1,0 +1,9 @@
+# EDA (src/eda, scripts/fetch_lasot_annotations.py, scripts/compare_eda.py)
+# pip install -r environment/requirements-eda.txt
+numpy>=1.26
+pandas>=2.2
+matplotlib>=3.9  # boxplot(tick_labels=...)
+pillow>=10
+requests>=2.31
+tabulate>=0.9
+ipykernel

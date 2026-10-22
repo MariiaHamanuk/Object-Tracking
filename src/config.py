@@ -8,9 +8,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Override without editing the file:  export LASOT_ROOT=/path/to/lasot
 DATA_ROOT = Path(os.environ.get("LASOT_ROOT", REPO_ROOT / "data"))
 
-# Classes to analyse. Add more as you download them; nothing else changes.
-# later: person,elephant,cat,drone,basketball,goldfish   (or override: export LASOT_CLASSES=person,cat)
-CLASSES = os.environ.get("LASOT_CLASSES", "person").split(",")
+# Classes to analyse. Default: every class folder found in DATA_ROOT (fill it with
+# scripts/fetch_lasot_annotations.py). Override: export LASOT_CLASSES=person,cat
+CLASSES = (os.environ["LASOT_CLASSES"].split(",") if os.environ.get("LASOT_CLASSES") else
+           sorted(p.name for p in DATA_ROOT.iterdir() if p.is_dir() and p.name != "att") if DATA_ROOT.is_dir() else [])
 
 # Official LaSOT test list (one sequence name per line, e.g. "person-3").
 # Put it next to the data; set to None if you don't have it yet.
@@ -18,9 +19,9 @@ SPLIT_FILE = DATA_ROOT / "testing_set.txt"
 
 # Official per-sequence attribute labels: ATTRIBUTE_DIR/<seq>.txt, 14 values of 1/0 (from the toolkit's annos/att).
 ATTRIBUTE_DIR = DATA_ROOT / "att"
-# Names of the 14 columns IN FILE ORDER. Do NOT guess: take it from the toolkit's MATLAB code, then
-# confirm with stats.check_attribute_columns(). Example shape (not verified!): ["ARC", "BC", ...]
-ATTRIBUTE_ORDER = None
+# Names of the 14 columns IN FILE ORDER, from att_fig_name in the toolkit's
+# run_tracker_performance_evaluation.m. Still confirm with stats.check_attribute_columns() (FOC, OV ~ 1.0).
+ATTRIBUTE_ORDER = ["IV", "POC", "DEF", "MB", "CM", "ROT", "BC", "VC", "SV", "FOC", "FM", "OV", "LR", "ARC"]
 
 FPS = 30
 RESULTS_DIR = REPO_ROOT / "results" / "eda"
