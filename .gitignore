@@ -20,6 +20,7 @@ venv/
 cache/
 embeddings/
 /tmp_frames/
+/results_raw/
 /output/
 
 # Results: комітимо лише маленькі csv/json

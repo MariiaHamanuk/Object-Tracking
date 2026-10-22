@@ -7,8 +7,11 @@ so an interrupted run can simply be restarted.
     python scripts/run_ostrack_lasot.py --checkpoint OSTrack_ep0300.pth.tar
     python scripts/run_ostrack_lasot.py --checkpoint ... --shard 0 --num-shards 2   # one process per GPU
     python scripts/run_ostrack_lasot.py --checkpoint ... --sequences airplane-1 --max-frames 50  # smoke test
+    python scripts/run_ostrack_lasot.py --checkpoint ... --sequences configs/splits/dev_occlusion.txt \\
+        --vjepa-cache cache/vjepa --out results_raw/ostrack_vjepa_reloc   # + V-JEPA re-localization
 
-Writes <out>/<seq>.txt (x y w h per frame), <seq>_score.txt (confidence) and <seq>_time.txt.
+Writes <out>/<seq>.txt (x y w h per frame), <seq>_score.txt (confidence) and <seq>_time.txt;
+with --vjepa-cache also <seq>_reloc.csv (every V-JEPA check and whether the search region moved).
 """
 from __future__ import annotations
 
@@ -18,13 +21,18 @@ import sys
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
+import pandas as pd
 import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
+from src.data.lasot import read_split  # noqa: E402
 from src.data.remote_zip import HF_FILE, retry, stream_sequences  # noqa: E402
+from src.tracker.fusion import VJEPACache  # noqa: E402
 from src.tracker.ostrack import DEFAULT_CONFIG, OSTrackRunner  # noqa: E402
+from src.tracker.relocalize import VJEPARelocalizer  # noqa: E402
 
 
 def test_sequences() -> list[str]:
@@ -42,7 +50,9 @@ def main():
     p.add_argument("--config", default=DEFAULT_CONFIG)
     p.add_argument("--out", type=Path, default=None, help="default: results/ostrack/<config>/lasot")
     p.add_argument("--work", type=Path, default=REPO_ROOT / "tmp_frames", help="scratch dir for frames")
-    p.add_argument("--sequences", default=None, help="comma-separated; default: official test set")
+    p.add_argument("--sequences", default=None, help="split file or comma-separated names; default: test set")
+    p.add_argument("--vjepa-cache", type=Path, default=None,
+                   help="folder with <seq>.npz from scripts/cache_vjepa.py -> enable V-JEPA re-localization")
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--num-shards", type=int, default=1)
     p.add_argument("--max-frames", type=int, default=None, help="only for quick tests (output not comparable)")
@@ -50,7 +60,14 @@ def main():
 
     out = a.out or REPO_ROOT / "results" / "ostrack" / a.config / "lasot"
     out.mkdir(parents=True, exist_ok=True)
-    seqs = a.sequences.split(",") if a.sequences else test_sequences()
+    if a.sequences and Path(a.sequences).is_file():
+        seqs = sorted(read_split(a.sequences))
+    else:
+        seqs = a.sequences.split(",") if a.sequences else test_sequences()
+    if a.vjepa_cache:
+        missing = [s for s in seqs if not (a.vjepa_cache / f"{s}.npz").exists()]
+        if missing:
+            sys.exit(f"no V-JEPA cache for {len(missing)} videos, e.g. {missing[:3]}")
     seqs = seqs[a.shard::a.num_shards]
     todo = [s for s in seqs if not (out / f"{s}.txt").exists()]
     print(f"shard {a.shard}/{a.num_shards}: {len(seqs)} videos, {len(seqs) - len(todo)} done, {len(todo)} to run",
@@ -67,7 +84,13 @@ def main():
             continue
         gt = load_box_file(seq_dir / "groundtruth.txt")
         frames = sorted((seq_dir / "img").glob("*.jpg"))[: a.max_frames]
-        res = runner.track(frames, gt[0])
+        hook = None
+        if a.vjepa_cache:
+            h, w = cv2.imread(str(frames[0])).shape[:2]
+            hook = VJEPARelocalizer(VJEPACache(a.vjepa_cache / f"{seq}.npz"), w, h, gt[0])
+        res = runner.track(frames, gt[0], hook=hook)
+        if hook is not None:
+            pd.DataFrame(hook.log).to_csv(out / f"{seq}_reloc.csv", index=False)
         np.savetxt(out / f"{seq}_score.txt", res["scores"], fmt="%.4f")
         np.savetxt(out / f"{seq}_time.txt", res["times"], fmt="%.5f")
         np.savetxt(out / f"{seq}.txt", res["boxes"], fmt="%.2f", delimiter="\t")  # written last = done marker
@@ -75,7 +98,7 @@ def main():
         n_frames += len(frames)
         el = time.time() - t0
         print(f"[{k}/{len(todo)}] {seq}: {len(frames)} frames, {len(frames) / res['times'].sum():.0f} fps model, "
-              f"{n_frames / el:.0f} fps overall, elapsed {el / 60:.0f} min, "
+              f"{n_frames / el:.0f} fps overall, moved {len(res['moved'])}x, elapsed {el / 60:.0f} min, "
               f"eta {el / k * (len(todo) - k) / 60:.0f} min", flush=True)
     if failed:
         sys.exit(f"failed: {','.join(failed)} - run again to retry")

@@ -54,11 +54,15 @@ class OSTrackRunner:
 
         net.forward = forward_with_score
 
-    def track(self, frames: list[Path], init_box) -> dict:
+    def track(self, frames: list[Path], init_box, hook=None) -> dict:
         """frames: image paths in order; init_box: (x, y, w, h) on frames[0].
-        Returns boxes (N, 4), scores (N,) with NaN for the init frame, and per-frame seconds."""
+        hook(i, box, score) -> new search centre box or None is called after every frame; a returned
+        box replaces the tracker state, so the search region of frame i+1 is cut around it.
+        Returns boxes (N, 4), scores (N,) with NaN for the init frame, per-frame seconds and the
+        frames where the hook moved the search region."""
         n = len(frames)
         boxes, scores, times = np.zeros((n, 4)), np.full(n, np.nan), np.zeros(n)
+        moved = []
         for i, f in enumerate(frames):
             image = cv2.cvtColor(cv2.imread(str(f)), cv2.COLOR_BGR2RGB)
             t = time.perf_counter()
@@ -68,5 +72,10 @@ class OSTrackRunner:
             else:
                 boxes[i] = self.tracker.track(image)["target_bbox"]
                 scores[i] = self.last_score
+            if hook is not None:
+                new = hook(i, boxes[i], scores[i])
+                if new is not None:
+                    self.tracker.state = [float(v) for v in new]
+                    moved.append(i)
             times[i] = time.perf_counter() - t
-        return dict(boxes=boxes, scores=scores, times=times)
+        return dict(boxes=boxes, scores=scores, times=times, moved=np.array(moved, dtype=int))

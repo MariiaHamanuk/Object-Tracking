@@ -1,0 +1,16 @@
+{
+  "n_episodes": 140,
+  "n_ostrack_lost_at_reappearance": 129,
+  "motion": {
+    "top1_hit": 60.0,
+    "top1_chance": 2.8208705357142856,
+    "gt_percentile": 97.65345982142857,
+    "beats_ostrack_when_lost": 68.21705426356588
+  },
+  "static": {
+    "top1_hit": 26.42857142857143,
+    "top1_chance": 2.8208705357142856,
+    "gt_percentile": 90.859375,
+    "beats_ostrack_when_lost": 61.240310077519375
+  }
+}
