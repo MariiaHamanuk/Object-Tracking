@@ -53,6 +53,9 @@ def main():
     p.add_argument("--sequences", default=None, help="split file or comma-separated names; default: test set")
     p.add_argument("--vjepa-cache", type=Path, default=None,
                    help="folder with <seq>.npz from scripts/cache_vjepa.py -> enable V-JEPA re-localization")
+    p.add_argument("--fusion", type=Path, default=None,
+                   help="fusion.pth from scripts/train_fusion.py: use the trained fusion (needs --vjepa-cache) "
+                        "instead of re-localization")
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--num-shards", type=int, default=1)
     p.add_argument("--max-frames", type=int, default=None, help="only for quick tests (output not comparable)")
@@ -64,6 +67,8 @@ def main():
         seqs = sorted(read_split(a.sequences))
     else:
         seqs = a.sequences.split(",") if a.sequences else test_sequences()
+    if a.fusion and not a.vjepa_cache:
+        sys.exit("--fusion needs --vjepa-cache")
     if a.vjepa_cache:
         missing = [s for s in seqs if not (a.vjepa_cache / f"{s}.npz").exists()]
         if missing:
@@ -76,6 +81,8 @@ def main():
         return
 
     runner = OSTrackRunner(a.checkpoint, a.config, save_dir=a.work / "ostrack_output")
+    if a.fusion:
+        runner.enable_fusion(a.fusion)
     t0, n_frames, failed = time.time(), 0, []
     for k, (seq, seq_dir, err) in enumerate(stream_sequences(todo, a.work / f"shard{a.shard}"), 1):
         if err is not None:
@@ -87,7 +94,11 @@ def main():
         hook = None
         if a.vjepa_cache:
             h, w = cv2.imread(str(frames[0])).shape[:2]
-            hook = VJEPARelocalizer(VJEPACache(a.vjepa_cache / f"{seq}.npz"), w, h, gt[0])
+            cache = VJEPACache(a.vjepa_cache / f"{seq}.npz")
+            if a.fusion:
+                runner.set_vjepa(cache, w, h)
+            else:
+                hook = VJEPARelocalizer(cache, w, h, gt[0])
         res = runner.track(frames, gt[0], hook=hook)
         if hook is not None:
             pd.DataFrame(hook.log).to_csv(out / f"{seq}_reloc.csv", index=False)

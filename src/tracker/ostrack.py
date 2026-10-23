@@ -42,8 +42,11 @@ class OSTrackRunner:
         params.checkpoint = str(checkpoint)
         params.debug = 0
         self.tracker = OSTrack(params, "lasot")
+        self.vjepa = None  # (cache, frame_w, frame_h) while a fused video is tracked
+        self._record_scores()
 
-        # record the confidence of every forward pass without touching OSTrack's code
+    def _record_scores(self):
+        """Record the confidence of every forward pass without touching OSTrack's code."""
         net, forward = self.tracker.network, self.tracker.network.forward
         self.last_score = np.nan
 
@@ -53,6 +56,42 @@ class OSTrackRunner:
             return out
 
         net.forward = forward_with_score
+
+    def enable_fusion(self, fusion_weights: Path):
+        """Insert a trained FusionV1 between OSTrack's backbone and box head (src/tracker/fusion.py).
+        Call set_vjepa(cache, w, h) for every video before track()."""
+        import torch
+        from src.tracker.fusion import FusedOSTrack, FusionV1
+
+        fusion = FusionV1()
+        fusion.load_state_dict(torch.load(fusion_weights, map_location="cpu"))
+        fused = FusedOSTrack(self.tracker.network, fusion).to(next(self.tracker.network.parameters()).device).eval()
+        runner = self
+
+        class Network(torch.nn.Module):  # what OSTrack's tracker calls: forward(...) and .box_head
+            def __init__(self):
+                super().__init__()
+                self.fused, self.box_head = fused, fused.net.box_head
+
+            def forward(self, template, search, ce_template_mask=None, **kwargs):
+                return self.fused(template, search, runner._vjepa_tokens(search.device), ce_template_mask)
+
+        self.tracker.network = Network()
+        self._record_scores()
+
+    def set_vjepa(self, cache, frame_w: int, frame_h: int):
+        self.vjepa = (cache, frame_w, frame_h)
+
+    def _vjepa_tokens(self, device):
+        """V-JEPA map of the current frame resampled to the search region OSTrack is about to cut."""
+        import torch
+        from src.tracker.fusion import align_to_crop, search_crop
+
+        cache, w, h = self.vjepa
+        fmap = torch.from_numpy(cache.at(self._frame).astype(np.float32))[None].to(device)
+        crop = torch.tensor([search_crop(self.tracker.state, self.tracker.params.search_factor)],
+                            dtype=torch.float32, device=device)
+        return align_to_crop(fmap, crop, torch.tensor([[w, h]], dtype=torch.float32, device=device))
 
     def track(self, frames: list[Path], init_box, hook=None) -> dict:
         """frames: image paths in order; init_box: (x, y, w, h) on frames[0].
@@ -65,6 +104,7 @@ class OSTrackRunner:
         moved = []
         for i, f in enumerate(frames):
             image = cv2.cvtColor(cv2.imread(str(f)), cv2.COLOR_BGR2RGB)
+            self._frame = i  # V-JEPA fusion reads the map of the current frame (causal cache lookup)
             t = time.perf_counter()
             if i == 0:
                 self.tracker.initialize(image, {"init_bbox": list(map(float, init_box))})
