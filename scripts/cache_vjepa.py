@@ -6,7 +6,11 @@ and the 16 x 16 x 1024 map of its last time step is stored. Frames are streamed 
     python scripts/cache_vjepa.py --sequences configs/splits/dev_occlusion.txt
     python scripts/cache_vjepa.py --sequences ... --shard 0 --num-shards 2   # one process per GPU
 
-Output: <out>/<seq>.npz with `frames` (int, 0-based frame index t) and `maps` (float16, N x 16 x 16 x C).
+With --surprise the V-JEPA predictor also predicts the last slot from the earlier ones and the
+per-token surprise 1 - cos(predicted, real) is stored (src/vjepa/predictor.py); ~2x slower.
+
+Output: <out>/<seq>.npz with `frames` (int, 0-based frame index t), `maps` (float16, N x 16 x 16 x C)
+and with --surprise `surprise` (float16, N x 16 x 16).
 Size: ~0.5 MB per map, i.e. ~180 MB per average dev video with --every 8.
 """
 from __future__ import annotations
@@ -25,6 +29,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.data.lasot import read_split  # noqa: E402
 from src.data.remote_zip import stream_sequences  # noqa: E402
 from src.vjepa.encoder import DEFAULT_MODEL, VJEPAEncoder, clip_indices  # noqa: E402
+from src.vjepa.predictor import VJEPAPredictor  # noqa: E402
 
 
 def main():
@@ -35,6 +40,7 @@ def main():
     p.add_argument("--clip-len", type=int, default=16)
     p.add_argument("--stride", type=int, default=2)
     p.add_argument("--batch", type=int, default=4, help="clips per forward pass")
+    p.add_argument("--surprise", action="store_true", help="also store the predictor's surprise map")
     p.add_argument("--out", type=Path, default=REPO_ROOT / "cache" / "vjepa")
     p.add_argument("--work", type=Path, default=REPO_ROOT / "tmp_frames")
     p.add_argument("--shard", type=int, default=0)
@@ -47,7 +53,7 @@ def main():
     print(f"shard {a.shard}/{a.num_shards}: {len(seqs)} videos, {len(todo)} to encode", flush=True)
     if not todo:
         return
-    enc = VJEPAEncoder(a.model)
+    enc = VJEPAPredictor(a.model) if a.surprise else VJEPAEncoder(a.model)
     t0, n_maps = time.time(), 0
     for k, (seq, seq_dir, err) in enumerate(stream_sequences(todo, a.work / f"vjepa_shard{a.shard}"), 1):
         if err is not None:
@@ -62,14 +68,20 @@ def main():
                 cache[i] = cv2.cvtColor(cv2.imread(str(paths[i])), cv2.COLOR_BGR2RGB)
             return cache[i]
 
-        maps = []
+        maps, surprise = [], []
         for b in range(0, len(ts), a.batch):
             clips = [[frame(i) for i in clip_indices(t, a.clip_len, a.stride)] for t in ts[b:b + a.batch]]
-            maps.append(enc.encode_batch(clips).numpy())
+            if a.surprise:
+                m, s = enc.encode_with_surprise(clips)
+                maps.append(m.numpy())
+                surprise.append(s.numpy())
+            else:
+                maps.append(enc.encode_batch(clips).numpy())
             keep = ts[b] - a.stride * a.clip_len  # frames older than the next clip can go
             for i in [i for i in cache if i < keep]:
                 del cache[i]
-        np.savez(a.out / f"{seq}.npz", frames=ts, maps=np.concatenate(maps))
+        extra = dict(surprise=np.concatenate(surprise)) if a.surprise else {}
+        np.savez(a.out / f"{seq}.npz", frames=ts, maps=np.concatenate(maps), **extra)
         shutil.rmtree(seq_dir, ignore_errors=True)
         n_maps += len(ts)
         el = time.time() - t0

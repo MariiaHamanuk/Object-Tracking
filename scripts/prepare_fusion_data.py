@@ -1,9 +1,12 @@
 """Build training samples for the V-JEPA fusion (docs/vjepa_integration.md, "Навчання").
 
-Per training video (configs/splits/train_fusion.txt) two kinds of samples, 50/50:
-  occlusion - the first frames after the target comes back; the search region is cut around the
-              box where it VANISHED, i.e. where a real tracker would still be looking
-  normal    - a visible frame with OSTrack's own training jitter (centre 3, scale 0.25)
+Per training video (configs/splits/train_fusion.txt) three kinds of samples:
+  occlusion - (kind 1) the first frames after the target comes back; the search region is cut around
+              the box where it VANISHED, i.e. where a real tracker would still be looking
+  absent    - (kind 2) a frame INSIDE the absence episode, same crop: the target is not there, so a
+              retrained score head should learn to give a low peak (search_box = 0, in_crop = 0)
+  normal    - (kind 0) a visible frame with OSTrack's own training jitter (centre 3, scale 0.25),
+              as many as occlusion samples
 The template is a visible frame up to 100 frames earlier. Each sample stores the template / search
 crops exactly as OSTrack cuts them, the target box inside the search crop, the crop geometry and the
 FULL-frame V-JEPA map of the causal clip ending at the search frame (the crop part is resampled at
@@ -62,9 +65,10 @@ def plan_samples(s, n_per_kind: int, rng: np.random.Generator) -> list[dict]:
         tmpl = template_for(a)  # frames before the episode, up to the last one where it was seen
         if cand and tmpl is not None:
             plans.append(dict(kind=1, t=int(rng.choice(cand)), template_t=tmpl, centre=s.boxes[a - 1].copy()))
+            plans.append(dict(kind=2, t=int(rng.integers(a, back)), template_t=tmpl, centre=s.boxes[a - 1].copy()))
 
     # normal samples: as many as occlusion samples (at least a few for videos without occlusion)
-    n_norm = max(len(plans), min(n_per_kind, 4))
+    n_norm = max(sum(p["kind"] == 1 for p in plans), min(n_per_kind, 4))
     cand = np.flatnonzero(ok[1:]) + 1
     for t in rng.choice(cand, size=min(n_norm, len(cand)), replace=False) if len(cand) else []:
         tmpl = template_for(int(t))
@@ -148,7 +152,9 @@ def main():
             tc, tb = crop_with_box(img(pl["template_t"]), s.boxes[pl["template_t"]], s.boxes[pl["template_t"]],
                                    TEMPLATE_FACTOR, TEMPLATE_SIZE)
             sc, sb = crop_with_box(img(pl["t"]), pl["centre"], s.boxes[pl["t"]], SEARCH_FACTOR, SEARCH_SIZE)
-            cx, cy = sb[0] + sb[2] / 2, sb[1] + sb[3] / 2
+            if pl["kind"] == 2:  # target hidden: no box (LaSOT often keeps a stale one on absent frames)
+                sb = np.zeros(4, dtype=np.float32)
+            cx, cy = (sb[0] + sb[2] / 2, sb[1] + sb[3] / 2) if pl["kind"] != 2 else (-1.0, -1.0)
             rec["template"].append(tc)
             rec["template_box"].append(tb)
             rec["search"].append(sc)
@@ -166,7 +172,8 @@ def main():
 
         n_total += len(plans)
         el = time.time() - t0
-        print(f"[{k}/{len(todo)}] {seq}: {len(plans)} samples ({sum(arrays['kind'])} occlusion, "
+        print(f"[{k}/{len(todo)}] {seq}: {len(plans)} samples ({int((arrays['kind'] == 1).sum())} occlusion, "
+              f"{int((arrays['kind'] == 2).sum())} absent, "
               f"{int(arrays['in_crop'].sum())} with target in crop) | {n_total / el:.2f} samples/s | "
               f"eta {el / k * (len(todo) - k) / 60:.0f} min", flush=True)
 

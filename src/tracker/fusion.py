@@ -11,6 +11,7 @@ the search tokens it considers background; the fusion adds V-JEPA features to th
 """
 from __future__ import annotations
 
+import copy
 import math
 
 import numpy as np
@@ -57,19 +58,37 @@ class FusionV1(nn.Module):
         return x + self.mlp(torch.cat([x, self.proj(v)], dim=-1))
 
 
-class FusedOSTrack(nn.Module):
-    """Frozen OSTrack network + trainable fusion between backbone and box head."""
+HEAD_PARTS = {"none": (), "score": ("conv1_ctr", "conv2_ctr", "conv3_ctr", "conv4_ctr", "conv5_ctr"),
+              "all": ("",)}  # which layers of OSTrack's CenterPredictor may learn
 
-    def __init__(self, ostrack_net: nn.Module, fusion: nn.Module):
+
+class FusedOSTrack(nn.Module):
+    """Frozen OSTrack network + trainable fusion between backbone and box head.
+
+    train_head="score" / "all" also unfreezes the score branch / the whole box head (fine-tuned from
+    OSTrack's weights; BatchNorm statistics stay frozen). A frozen copy of the original head is kept as
+    `teacher`, and in training mode out["teacher_score_map"] is the original OSTrack's score map on
+    the unfused features (for a distillation loss that keeps the head from forgetting OSTrack)."""
+
+    def __init__(self, ostrack_net: nn.Module, fusion: nn.Module, train_head: str = "none"):
         super().__init__()
         self.net, self.fusion = ostrack_net, fusion
+        self.teacher = copy.deepcopy(self.net.box_head) if train_head != "none" else None
         for p in self.net.parameters():
             p.requires_grad_(False)
+        for name, p in self.net.box_head.named_parameters():
+            if any(name.startswith(part) for part in HEAD_PARTS[train_head]):
+                p.requires_grad_(True)
+        if self.teacher is not None:
+            for p in self.teacher.parameters():
+                p.requires_grad_(False)
         self.n_search = self.net.feat_len_s  # 256
 
     def train(self, mode: bool = True):
         super().train(mode)
-        self.net.eval()  # frozen part always in eval mode (no dropout / drop-path)
+        self.net.eval()  # frozen part always in eval mode (no dropout / drop-path, frozen BatchNorm)
+        if self.teacher is not None:
+            self.teacher.eval()
         return self
 
     def forward(self, template, search, vjepa_tokens, ce_template_mask=None, ce_keep_rate=None):
@@ -80,6 +99,11 @@ class FusedOSTrack(nn.Module):
         s = self.fusion(feat[:, -self.n_search:], vjepa_tokens.to(feat.dtype))
         out = self.net.forward_head(torch.cat([feat[:, :-self.n_search], s], dim=1), None)
         out.update(aux)
+        if self.training and self.teacher is not None:
+            with torch.no_grad():
+                x = feat[:, -self.n_search:]
+                g = int(math.isqrt(self.n_search))
+                out["teacher_score_map"] = self.teacher(x.transpose(1, 2).reshape(len(x), -1, g, g), None)[0]
         return out
 
 
@@ -90,7 +114,13 @@ class VJEPACache:
     def __init__(self, path):
         d = np.load(path)
         self.frames, self.maps = d["frames"], d["maps"]
+        self.surprise = d["surprise"] if "surprise" in d.files else None  # (N, 16, 16), cache_vjepa.py --surprise
+
+    def _index(self, t: int) -> int:
+        return max(int(np.searchsorted(self.frames, t, side="right")) - 1, 0)
 
     def at(self, t: int) -> np.ndarray:
-        i = max(int(np.searchsorted(self.frames, t, side="right")) - 1, 0)
-        return self.maps[i]
+        return self.maps[self._index(t)]
+
+    def surprise_at(self, t: int) -> np.ndarray:
+        return self.surprise[self._index(t)]

@@ -57,14 +57,17 @@ class OSTrackRunner:
 
         net.forward = forward_with_score
 
-    def enable_fusion(self, fusion_weights: Path):
-        """Insert a trained FusionV1 between OSTrack's backbone and box head (src/tracker/fusion.py).
+    def enable_fusion(self, fusion_weights: Path, head_weights: Path | None = None):
+        """Insert a trained FusionV1 between OSTrack's backbone and box head (src/tracker/fusion.py),
+        optionally with the fine-tuned box head (head.pth from train_fusion.py --train-head).
         Call set_vjepa(cache, w, h) for every video before track()."""
         import torch
         from src.tracker.fusion import FusedOSTrack, FusionV1
 
         fusion = FusionV1()
         fusion.load_state_dict(torch.load(fusion_weights, map_location="cpu"))
+        if head_weights is not None:
+            self.tracker.network.box_head.load_state_dict(torch.load(head_weights, map_location="cpu"))
         fused = FusedOSTrack(self.tracker.network, fusion).to(next(self.tracker.network.parameters()).device).eval()
         runner = self
 
@@ -93,14 +96,16 @@ class OSTrackRunner:
                             dtype=torch.float32, device=device)
         return align_to_crop(fmap, crop, torch.tensor([[w, h]], dtype=torch.float32, device=device))
 
-    def track(self, frames: list[Path], init_box, hook=None, verify: bool = False) -> dict:
+    def track(self, frames: list[Path], init_box, hook=None, verify: bool = False, verify_min: float = 0.0) -> dict:
         """frames: image paths in order; init_box: (x, y, w, h) on frames[0].
         hook(i, box, score) -> None, one box or a list of candidate boxes, called after every frame.
           verify=False: the (first) returned box replaces the tracker state, so the search region of
                         frame i+1 is cut around it.
           verify=True:  OSTrack re-runs on the SAME frame with its search region around every
                         candidate; the best candidate is kept only if its score beats the current one,
-                        and then also replaces this frame's output box.
+                        and then also replaces this frame's output box. With verify_min > 0 the
+                        winner's score must also reach verify_min (a confident detection, not just
+                        a less bad one than the lost box).
         Returns boxes (N, 4), scores (N,) with NaN for the init frame, per-frame seconds, the frames
         where the search region moved, and `checks` (one row per verified candidate set)."""
         n = len(frames)
@@ -123,7 +128,7 @@ class OSTrackRunner:
                     self.tracker.state = [float(v) for v in cands[0]]
                     moved.append(i)
                 else:
-                    best = self._verify(image, cands, boxes[i], scores[i])
+                    best = self._verify(image, cands, boxes[i], scores[i], verify_min)
                     checks.append(dict(frame=i, score=float(scores[i]), n_candidates=len(cands),
                                        best_score=best[1], accepted=best[0] is not None))
                     if best[0] is not None:
@@ -132,14 +137,15 @@ class OSTrackRunner:
             times[i] = time.perf_counter() - t
         return dict(boxes=boxes, scores=scores, times=times, moved=np.array(moved, dtype=int), checks=checks)
 
-    def _verify(self, image, candidates, box, score):
+    def _verify(self, image, candidates, box, score, min_score: float = 0.0):
         """Run OSTrack around every candidate on the same frame; keep the best one only if OSTrack is
-        more confident there than at its current box. Leaves the tracker state on the winner."""
+        more confident there than at its current box (and at least min_score). Leaves the tracker
+        state on the winner."""
         best_box, best_score = None, float(score)
         for c in candidates:
             self.tracker.state = [float(v) for v in c]
             out = self.tracker.track(image)["target_bbox"]
-            if self.last_score > best_score:
+            if self.last_score > max(best_score, min_score):
                 best_box, best_score = np.asarray(out, dtype=float), float(self.last_score)
         self.tracker.state = [float(v) for v in (best_box if best_box is not None else box)]
         return best_box, best_score

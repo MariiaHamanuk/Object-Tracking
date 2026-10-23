@@ -1,0 +1,71 @@
+"""V-JEPA 2 predictor (the "world model" part): predict the features of hidden tokens from visible ones.
+
+HF's VJEPA2Model.forward runs the encoder on the WHOLE clip and only then drops the target tokens, so
+hidden content leaks into the context through attention. As in V-JEPA training, `predict` runs the
+encoder on the context tokens only (RoPE positions come from their indices) and the predictor then
+fills in the targets.
+
+Token index = slot * 256 + row * 16 + col, slot = time step of 2 frames (tubelet), 8 slots per
+16-frame clip.
+"""
+from __future__ import annotations
+
+import numpy as np
+import torch
+
+from src.vjepa.encoder import VJEPAEncoder, box_to_grid
+
+
+class VJEPAPredictor(VJEPAEncoder):
+    @torch.no_grad()
+    def encode_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (1, T, 3, 256, 256) preprocessed clip -> (N, C) encoder tokens of the full clip."""
+        return self.model.get_vision_features(pixel_values_videos=x.to(self.device, self.dtype))[0].float().cpu()
+
+    @torch.no_grad()
+    def predict(self, x: torch.Tensor, ctx: np.ndarray, tgt: np.ndarray) -> torch.Tensor:
+        """Encode only the `ctx` tokens of clip(s) x (B, T, 3, H, W), predict the `tgt` tokens
+        -> (len(tgt), C) for one clip, (B, len(tgt), C) for several. Same ctx / tgt for every clip."""
+        enc, dev = self.model.encoder, self.device
+        h = enc.embeddings(x.to(dev, self.dtype))                                     # (B, N, C)
+        b = h.shape[0]
+        ci = torch.as_tensor(np.sort(ctx), device=dev)[None].expand(b, -1)
+        ti = torch.as_tensor(np.sort(tgt), device=dev)[None].expand(b, -1)
+        hc = torch.gather(h, 1, ci[..., None].expand(-1, -1, h.shape[-1]))
+        for layer in enc.layer:
+            hc = layer(hc, ci)[0]
+        hc = enc.layernorm(hc)
+        full = h.new_zeros(h.shape).scatter(1, ci[..., None].expand_as(hc), hc)       # predictor gathers ctx itself
+        out = self.model.predictor(encoder_hidden_states=full, context_mask=[ci], target_mask=[ti])
+        out = out.last_hidden_state.float().cpu()
+        return out[0] if b == 1 else out
+
+    @torch.no_grad()
+    def encode_with_surprise(self, clips: list[list[np.ndarray]]) -> tuple[torch.Tensor, torch.Tensor]:
+        """For each clip: the map of its last time slot (like encode_batch) and the predictor's
+        surprise there: the last slot ("now") is predicted from the earlier slots only, and
+        surprise = 1 - cos(predicted, real) per token. High where the scene changed in a way the
+        model did not expect, e.g. where the target just disappeared behind something.
+        Returns (B, 16, 16, C) fp16 and (B, 16, 16) fp16 on CPU."""
+        x = torch.cat([self.preprocess(c) for c in clips])
+        g, slots = self.grid, len(clips[0]) // self.tubelet
+        real = self.model.get_vision_features(pixel_values_videos=x.to(self.device, self.dtype))
+        real = real.float().view(len(clips), slots, g * g, -1)[:, -1].cpu()          # (B, 256, C)
+        last = self.slot_tokens(slots - 1)
+        pred = self.predict(x, np.arange(last[0]), last)
+        pred = pred if pred.dim() == 3 else pred[None]
+        surprise = 1 - torch.nn.functional.cosine_similarity(pred, real, dim=-1)       # (B, 256)
+        return real.view(len(clips), g, g, -1).half(), surprise.view(len(clips), g, g).half()
+
+    def slot_tokens(self, slot: int) -> np.ndarray:
+        g = self.grid
+        return slot * g * g + np.arange(g * g)
+
+    def box_tokens(self, box, frame_w: int, frame_h: int, slot: int) -> np.ndarray:
+        """Token indices of `slot` touched by a pixel box (at least one token)."""
+        g = self.grid
+        x0, y0, x1, y1 = box_to_grid(box, frame_w, frame_h, g)
+        c0, r0 = int(np.clip(np.floor(x0), 0, g - 1)), int(np.clip(np.floor(y0), 0, g - 1))
+        c1, r1 = int(np.clip(np.ceil(x1), c0 + 1, g)), int(np.clip(np.ceil(y1), r0 + 1, g))
+        rr, cc = np.mgrid[r0:r1, c0:c1]
+        return (slot * g * g + rr * g + cc).ravel()

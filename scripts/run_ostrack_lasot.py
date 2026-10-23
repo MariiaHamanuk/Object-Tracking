@@ -56,9 +56,16 @@ def main():
     p.add_argument("--reloc-verify", type=int, default=0, metavar="K",
                    help="re-localization proposes K places and OSTrack verifies them on the same frame "
                         "(0 = move to the best V-JEPA match without verification)")
+    p.add_argument("--verify-min", type=float, default=0.0,
+                   help="with --reloc-verify: OSTrack's score at the accepted candidate must also reach this")
+    p.add_argument("--surprise-gate", action="store_true",
+                   help="re-localize only after the V-JEPA predictor was surprised at the target "
+                        "(cache from cache_vjepa.py --surprise)")
     p.add_argument("--fusion", type=Path, default=None,
-                   help="fusion.pth from scripts/train_fusion.py: use the trained fusion (needs --vjepa-cache) "
-                        "instead of re-localization")
+                   help="fusion.pth from scripts/train_fusion.py: use the trained fusion (needs --vjepa-cache); "
+                        "re-localization is then off unless --reloc-verify is given")
+    p.add_argument("--fusion-head", type=Path, default=None,
+                   help="head.pth from scripts/train_fusion.py --train-head (fine-tuned box head)")
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--num-shards", type=int, default=1)
     p.add_argument("--max-frames", type=int, default=None, help="only for quick tests (output not comparable)")
@@ -85,7 +92,7 @@ def main():
 
     runner = OSTrackRunner(a.checkpoint, a.config, save_dir=a.work / "ostrack_output")
     if a.fusion:
-        runner.enable_fusion(a.fusion)
+        runner.enable_fusion(a.fusion, a.fusion_head)
     t0, n_frames, failed = time.time(), 0, []
     for k, (seq, seq_dir, err) in enumerate(stream_sequences(todo, a.work / f"shard{a.shard}"), 1):
         if err is not None:
@@ -100,10 +107,10 @@ def main():
             cache = VJEPACache(a.vjepa_cache / f"{seq}.npz")
             if a.fusion:
                 runner.set_vjepa(cache, w, h)
-            else:
-                params = RelocParams(candidates=max(a.reloc_verify, 1))
+            if not a.fusion or a.reloc_verify > 0:
+                params = RelocParams(candidates=max(a.reloc_verify, 1), surprise_gate=a.surprise_gate)
                 hook = VJEPARelocalizer(cache, w, h, gt[0], params)
-        res = runner.track(frames, gt[0], hook=hook, verify=a.reloc_verify > 0)
+        res = runner.track(frames, gt[0], hook=hook, verify=a.reloc_verify > 0, verify_min=a.verify_min)
         if hook is not None:
             pd.DataFrame(hook.log).to_csv(out / f"{seq}_reloc.csv", index=False)
             if res["checks"]:

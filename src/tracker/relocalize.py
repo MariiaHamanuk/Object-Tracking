@@ -18,6 +18,11 @@ With `candidates` > 1 the `candidates` most similar places outside the search wi
 `min_sep` tokens apart, i.e. different objects) are returned, for OSTrack to verify on the same frame
 (OSTrackRunner.track(verify=True)): the search region only moves if OSTrack itself is more confident
 there, which rejects look-alike distractors and moves made while OSTrack is still on the target.
+With `surprise_gate` (needs a cache from cache_vjepa.py --surprise) "doubt" also needs the V-JEPA
+predictor to have been surprised recently at the last confident box: surprise there (1 - cos of the
+predicted vs the real "now", src/vjepa/predictor.py) above `surprise_ratio` x its running mean on
+confident frames, within the last `surprise_window` frames. A drop of OSTrack's score from blur or a
+scale change does not surprise the world model; a target vanishing behind something does.
 Thresholds are fixed a priori, not tuned on the evaluation videos.
 """
 from __future__ import annotations
@@ -41,6 +46,9 @@ class RelocParams:
     search_factor: float = 4.0     # OSTrack's search window (to skip moves it can already see)
     candidates: int = 1            # >1: propose several places for OSTrack to verify
     min_sep: int = 2               # tokens between candidates (Chebyshev distance)
+    surprise_gate: bool = False    # doubt also needs a recent surprise of the V-JEPA predictor
+    surprise_ratio: float = 1.5    # "surprised" = box surprise above this x running mean on confident frames
+    surprise_window: int = 64      # frames a surprise keeps the gate open
 
 
 class VJEPARelocalizer:
@@ -51,6 +59,9 @@ class VJEPARelocalizer:
         self.m_recent = self.m_first.clone()
         self.last_box = np.asarray(init_box, dtype=float)
         self.score_mean = None
+        if params.surprise_gate and cache.surprise is None:
+            raise ValueError("surprise_gate needs a V-JEPA cache made with cache_vjepa.py --surprise")
+        self.surprise_mean, self.last_surprise = None, -10**9
         self.log = []  # one row per checked frame, for analysis
 
     def _map(self, t: int) -> torch.Tensor:
@@ -89,9 +100,21 @@ class VJEPARelocalizer:
         s_best = float(sim.flatten()[order[0]])
         outside = is_outside(*centre(order[0]))
         doubt = self.score_mean is not None and score < self.p.score_ratio * self.score_mean
+        extra = {}
+        if self.cache.surprise is not None:
+            surp = torch.from_numpy(self.cache.surprise_at(i).astype(np.float32))[..., None]
+            s_surp = float(pool_box(surp, self.last_box, self.w, self.h))
+            surprised = self.surprise_mean is not None and s_surp > self.p.surprise_ratio * self.surprise_mean
+            if surprised:
+                self.last_surprise = i
+            if confident and not surprised:
+                self.surprise_mean = s_surp if self.surprise_mean is None else 0.9 * self.surprise_mean + 0.1 * s_surp
+            extra = dict(surprise=s_surp, surprised=bool(surprised))
+            if self.p.surprise_gate:
+                doubt = doubt and i - self.last_surprise <= self.p.surprise_window
         move = doubt and outside and s_best - s_box > self.p.margin
         self.log.append(dict(frame=i, score=float(score), s_box=s_box, s_best=s_best, doubt=bool(doubt),
-                             outside=outside, moved=bool(move)))
+                             outside=outside, moved=bool(move), **extra))
         if not move:
             return None
 
