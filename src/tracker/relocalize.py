@@ -14,6 +14,10 @@ At every frame that has a cached V-JEPA map (every 8 frames):
     - V-JEPA disagrees: best similarity - similarity at OSTrack's box > margin, and the best token
                         lies outside OSTrack's current search window
 The new search centre keeps the size of the last confident box.
+With `candidates` > 1 the `candidates` most similar places outside the search window (at least
+`min_sep` tokens apart, i.e. different objects) are returned, for OSTrack to verify on the same frame
+(OSTrackRunner.track(verify=True)): the search region only moves if OSTrack itself is more confident
+there, which rejects look-alike distractors and moves made while OSTrack is still on the target.
 Thresholds are fixed a priori, not tuned on the evaluation videos.
 """
 from __future__ import annotations
@@ -35,6 +39,8 @@ class RelocParams:
     score_ratio: float = 0.75      # "doubt" = score below this fraction of the running confident mean
     margin: float = 0.10           # cosine gap between best location and OSTrack's box
     search_factor: float = 4.0     # OSTrack's search window (to skip moves it can already see)
+    candidates: int = 1            # >1: propose several places for OSTrack to verify
+    min_sep: int = 2               # tokens between candidates (Chebyshev distance)
 
 
 class VJEPARelocalizer:
@@ -70,17 +76,33 @@ class VJEPARelocalizer:
         sim = F.cosine_similarity(fmap, m[None, None], dim=-1)                      # (G, G)
         s_box = float(F.cosine_similarity(pool_box(fmap, box, self.w, self.h), m, dim=0))
         g = sim.shape[0]
-        r, c = divmod(int(sim.argmax()), g)
-        s_best = float(sim[r, c])
-        cx, cy = (c + 0.5) * self.w / g, (r + 0.5) * self.h / g
-
         x1, y1, side = search_crop(box, self.p.search_factor)
-        outside = not (x1 <= cx <= x1 + side and y1 <= cy <= y1 + side)
+
+        def centre(k):
+            r, c = divmod(int(k), g)
+            return (c + 0.5) * self.w / g, (r + 0.5) * self.h / g
+
+        def is_outside(cx, cy):
+            return not (x1 <= cx <= x1 + side and y1 <= cy <= y1 + side)
+
+        order = torch.argsort(sim.flatten(), descending=True)
+        s_best = float(sim.flatten()[order[0]])
+        outside = is_outside(*centre(order[0]))
         doubt = self.score_mean is not None and score < self.p.score_ratio * self.score_mean
         move = doubt and outside and s_best - s_box > self.p.margin
         self.log.append(dict(frame=i, score=float(score), s_box=s_box, s_best=s_best, doubt=bool(doubt),
                              outside=outside, moved=bool(move)))
         if not move:
             return None
+
+        picked = []  # most similar places outside the window, min_sep tokens apart (different objects)
+        for k in order.tolist():
+            r, c = divmod(k, g)
+            if not is_outside(*centre(k)) or any(max(abs(r - pr), abs(c - pc)) < self.p.min_sep for pr, pc in picked):
+                continue
+            picked.append((r, c))
+            if len(picked) == self.p.candidates:
+                break
         w, h = self.last_box[2:]
-        return np.array([cx - w / 2, cy - h / 2, w, h])
+        boxes = [np.array([cx - w / 2, cy - h / 2, w, h]) for cx, cy in (centre(r * g + c) for r, c in picked)]
+        return boxes[0] if self.p.candidates == 1 else np.stack(boxes)

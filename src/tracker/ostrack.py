@@ -93,15 +93,19 @@ class OSTrackRunner:
                             dtype=torch.float32, device=device)
         return align_to_crop(fmap, crop, torch.tensor([[w, h]], dtype=torch.float32, device=device))
 
-    def track(self, frames: list[Path], init_box, hook=None) -> dict:
+    def track(self, frames: list[Path], init_box, hook=None, verify: bool = False) -> dict:
         """frames: image paths in order; init_box: (x, y, w, h) on frames[0].
-        hook(i, box, score) -> new search centre box or None is called after every frame; a returned
-        box replaces the tracker state, so the search region of frame i+1 is cut around it.
-        Returns boxes (N, 4), scores (N,) with NaN for the init frame, per-frame seconds and the
-        frames where the hook moved the search region."""
+        hook(i, box, score) -> None, one box or a list of candidate boxes, called after every frame.
+          verify=False: the (first) returned box replaces the tracker state, so the search region of
+                        frame i+1 is cut around it.
+          verify=True:  OSTrack re-runs on the SAME frame with its search region around every
+                        candidate; the best candidate is kept only if its score beats the current one,
+                        and then also replaces this frame's output box.
+        Returns boxes (N, 4), scores (N,) with NaN for the init frame, per-frame seconds, the frames
+        where the search region moved, and `checks` (one row per verified candidate set)."""
         n = len(frames)
         boxes, scores, times = np.zeros((n, 4)), np.full(n, np.nan), np.zeros(n)
-        moved = []
+        moved, checks = [], []
         for i, f in enumerate(frames):
             image = cv2.cvtColor(cv2.imread(str(f)), cv2.COLOR_BGR2RGB)
             self._frame = i  # V-JEPA fusion reads the map of the current frame (causal cache lookup)
@@ -112,10 +116,30 @@ class OSTrackRunner:
             else:
                 boxes[i] = self.tracker.track(image)["target_bbox"]
                 scores[i] = self.last_score
-            if hook is not None:
-                new = hook(i, boxes[i], scores[i])
-                if new is not None:
-                    self.tracker.state = [float(v) for v in new]
+            cands = hook(i, boxes[i], scores[i]) if hook is not None else None
+            if cands is not None:
+                cands = [cands] if np.ndim(cands) == 1 else list(cands)
+                if not verify:
+                    self.tracker.state = [float(v) for v in cands[0]]
                     moved.append(i)
+                else:
+                    best = self._verify(image, cands, boxes[i], scores[i])
+                    checks.append(dict(frame=i, score=float(scores[i]), n_candidates=len(cands),
+                                       best_score=best[1], accepted=best[0] is not None))
+                    if best[0] is not None:
+                        boxes[i], scores[i] = best[0], best[1]
+                        moved.append(i)
             times[i] = time.perf_counter() - t
-        return dict(boxes=boxes, scores=scores, times=times, moved=np.array(moved, dtype=int))
+        return dict(boxes=boxes, scores=scores, times=times, moved=np.array(moved, dtype=int), checks=checks)
+
+    def _verify(self, image, candidates, box, score):
+        """Run OSTrack around every candidate on the same frame; keep the best one only if OSTrack is
+        more confident there than at its current box. Leaves the tracker state on the winner."""
+        best_box, best_score = None, float(score)
+        for c in candidates:
+            self.tracker.state = [float(v) for v in c]
+            out = self.tracker.track(image)["target_bbox"]
+            if self.last_score > best_score:
+                best_box, best_score = np.asarray(out, dtype=float), float(self.last_score)
+        self.tracker.state = [float(v) for v in (best_box if best_box is not None else box)]
+        return best_box, best_score

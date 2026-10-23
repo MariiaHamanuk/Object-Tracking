@@ -32,7 +32,7 @@ from src.data.lasot import read_split  # noqa: E402
 from src.data.remote_zip import HF_FILE, retry, stream_sequences  # noqa: E402
 from src.tracker.fusion import VJEPACache  # noqa: E402
 from src.tracker.ostrack import DEFAULT_CONFIG, OSTrackRunner  # noqa: E402
-from src.tracker.relocalize import VJEPARelocalizer  # noqa: E402
+from src.tracker.relocalize import RelocParams, VJEPARelocalizer  # noqa: E402
 
 
 def test_sequences() -> list[str]:
@@ -53,6 +53,9 @@ def main():
     p.add_argument("--sequences", default=None, help="split file or comma-separated names; default: test set")
     p.add_argument("--vjepa-cache", type=Path, default=None,
                    help="folder with <seq>.npz from scripts/cache_vjepa.py -> enable V-JEPA re-localization")
+    p.add_argument("--reloc-verify", type=int, default=0, metavar="K",
+                   help="re-localization proposes K places and OSTrack verifies them on the same frame "
+                        "(0 = move to the best V-JEPA match without verification)")
     p.add_argument("--fusion", type=Path, default=None,
                    help="fusion.pth from scripts/train_fusion.py: use the trained fusion (needs --vjepa-cache) "
                         "instead of re-localization")
@@ -98,10 +101,13 @@ def main():
             if a.fusion:
                 runner.set_vjepa(cache, w, h)
             else:
-                hook = VJEPARelocalizer(cache, w, h, gt[0])
-        res = runner.track(frames, gt[0], hook=hook)
+                params = RelocParams(candidates=max(a.reloc_verify, 1))
+                hook = VJEPARelocalizer(cache, w, h, gt[0], params)
+        res = runner.track(frames, gt[0], hook=hook, verify=a.reloc_verify > 0)
         if hook is not None:
             pd.DataFrame(hook.log).to_csv(out / f"{seq}_reloc.csv", index=False)
+            if res["checks"]:
+                pd.DataFrame(res["checks"]).to_csv(out / f"{seq}_verify.csv", index=False)
         np.savetxt(out / f"{seq}_score.txt", res["scores"], fmt="%.4f")
         np.savetxt(out / f"{seq}_time.txt", res["times"], fmt="%.5f")
         np.savetxt(out / f"{seq}.txt", res["boxes"], fmt="%.2f", delimiter="\t")  # written last = done marker
