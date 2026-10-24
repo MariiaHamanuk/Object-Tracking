@@ -23,6 +23,16 @@ predictor to have been surprised recently at the last confident box: surprise th
 predicted vs the real "now", src/vjepa/predictor.py) above `surprise_ratio` x its running mean on
 confident frames, within the last `surprise_window` frames. A drop of OSTrack's score from blur or a
 scale change does not surprise the world model; a target vanishing behind something does.
+Occlusion warning (`warning`, needs a cache from cache_vjepa.py --surprise for "both"): the predictor's
+surprise at the last confident box is high when the target starts to go behind something (dev, frames
+just before a full occlusion vs calm frames: AUROC 0.68, and nearly independent of OSTrack's score; both
+together 0.72), but not during a full occlusion (0.56) - so it is used as an early warning, not as a gate
+for moves. Signal = (z of the surprise + z of the score drop) / sqrt(2), z against running statistics of
+confident frames (causal). When it exceeds `warn_z` the tracker is "warned" until OSTrack is confident
+again (at least `warn_min` frames): the target memory, last box and score statistics are frozen (no
+occluder / distractor gets into the memory) and moves are easier (`warn_score_ratio`, `warn_margin`;
+OSTrack still verifies them). warning="score" is the same without the predictor (control).
+
 With a `detector` (src/tracker/detector.YOLODetector) the trigger is the same, but the candidates
 also include up to `yolo_k` detections outside the search window, ranked by V-JEPA similarity of
 their box to the memory: whole objects with real boxes. `log` records how many came from each source.
@@ -54,6 +64,11 @@ class RelocParams:
     surprise_window: int = 64      # frames a surprise keeps the gate open
     propose: bool = True           # False: only keep the target memory up to date (for the prior head)
     yolo_k: int = 3                # with a detector: detections added to the candidates
+    warning: str = "off"           # occlusion warning: "both" = predictor surprise + score drop, "score" = score only
+    warn_z: float = 2.0            # warning when the (combined) z-score exceeds this
+    warn_min: int = 16             # frames the warning lasts at least
+    warn_score_ratio: float = 0.9  # while warned: easier "doubt"
+    warn_margin: float = 0.05      # while warned: smaller V-JEPA margin
 
 
 class VJEPARelocalizer:
@@ -67,9 +82,11 @@ class VJEPARelocalizer:
         self.m_recent = self.m_first.clone()
         self.last_box = np.asarray(init_box, dtype=float)
         self.score_mean = None
-        if params.surprise_gate and cache.surprise is None:
-            raise ValueError("surprise_gate needs a V-JEPA cache made with cache_vjepa.py --surprise")
+        if (params.surprise_gate or params.warning == "both") and cache.surprise is None:
+            raise ValueError("surprise_gate / warning='both' need a V-JEPA cache made with cache_vjepa.py --surprise")
         self.surprise_mean, self.last_surprise = None, -10**9
+        self.score_var, self.surprise_var, self.n_stats = 0.0, 0.0, 0
+        self.warned, self.warned_since = False, -10**9
         self.log = []  # one row per checked frame, for analysis
 
     def _map(self, t: int) -> torch.Tensor:
@@ -80,15 +97,20 @@ class VJEPARelocalizer:
 
     def __call__(self, i: int, box, score, image=None) -> np.ndarray | None:
         confident = i == 0 or (np.isfinite(score) and score >= self.p.confident_score)
-        if confident:
+        learn = confident and not self.warned  # while warned nothing is learned (memory, box, statistics)
+        if learn:
             self.last_box = np.asarray(box, dtype=float)
             if i > 0:
-                self.score_mean = score if self.score_mean is None else 0.9 * self.score_mean + 0.1 * score
+                if self.score_mean is None:
+                    self.score_mean = score
+                else:
+                    self.score_var = 0.9 * self.score_var + 0.1 * (score - self.score_mean) ** 2
+                    self.score_mean = 0.9 * self.score_mean + 0.1 * score
         if i == 0 or i not in self.cached:
             return None
 
         fmap = self._map(i)
-        if confident:  # refresh the recent memory while OSTrack is on target
+        if learn:  # refresh the recent memory while OSTrack is on target
             cur = F.normalize(pool_box(fmap, box, self.w, self.h), dim=0)
             self.m_recent = F.normalize((1 - self.p.ema) * self.m_recent + self.p.ema * cur, dim=0)
         m = F.normalize(self.m_first + self.m_recent, dim=0)
@@ -107,20 +129,41 @@ class VJEPARelocalizer:
         order = torch.argsort(sim.flatten(), descending=True)
         s_best = float(sim.flatten()[order[0]])
         outside = is_outside(*centre(order[0]))
-        doubt = self.score_mean is not None and score < self.p.score_ratio * self.score_mean
-        extra = {}
+        extra, z_surp = {}, 0.0
         if self.cache.surprise is not None:
             surp = torch.from_numpy(self.cache.surprise_at(i).astype(np.float32))[..., None]
             s_surp = float(pool_box(surp, self.last_box, self.w, self.h))
             surprised = self.surprise_mean is not None and s_surp > self.p.surprise_ratio * self.surprise_mean
             if surprised:
                 self.last_surprise = i
-            if confident and not surprised:
-                self.surprise_mean = s_surp if self.surprise_mean is None else 0.9 * self.surprise_mean + 0.1 * s_surp
-            extra = dict(surprise=s_surp, surprised=bool(surprised))
-            if self.p.surprise_gate:
-                doubt = doubt and i - self.last_surprise <= self.p.surprise_window
-        move = self.p.propose and doubt and outside and s_best - s_box > self.p.margin
+            if self.surprise_mean is not None:
+                z_surp = (s_surp - self.surprise_mean) / np.sqrt(self.surprise_var + 1e-6)
+            if learn and not surprised:
+                if self.surprise_mean is None:
+                    self.surprise_mean = s_surp
+                else:
+                    self.surprise_var = 0.9 * self.surprise_var + 0.1 * (s_surp - self.surprise_mean) ** 2
+                    self.surprise_mean = 0.9 * self.surprise_mean + 0.1 * s_surp
+            extra = dict(surprise=s_surp, surprised=bool(surprised), z_surprise=z_surp)
+        if learn:
+            self.n_stats += 1
+
+        if self.p.warning != "off" and self.score_mean is not None and self.n_stats >= 10:  # statistics warmed up
+            z_score = (self.score_mean - score) / np.sqrt(self.score_var + 1e-6)
+            signal = z_score if self.p.warning == "score" else (z_surp + z_score) / np.sqrt(2)
+            if signal > self.p.warn_z:
+                self.warned, self.warned_since = True, i
+            elif (self.warned and i - self.warned_since >= self.p.warn_min
+                  and confident and score >= self.p.warn_score_ratio * self.score_mean):
+                self.warned = False
+            extra.update(z_score=z_score, warn_signal=signal, warned=self.warned)
+
+        ratio, margin = ((self.p.warn_score_ratio, self.p.warn_margin) if self.warned
+                         else (self.p.score_ratio, self.p.margin))
+        doubt = self.score_mean is not None and score < ratio * self.score_mean
+        if self.p.surprise_gate:
+            doubt = doubt and i - self.last_surprise <= self.p.surprise_window
+        move = self.p.propose and doubt and outside and s_best - s_box > margin
         self.log.append(dict(frame=i, score=float(score), s_box=s_box, s_best=s_best, doubt=bool(doubt),
                              outside=outside, moved=bool(move), **extra))
         if not move:

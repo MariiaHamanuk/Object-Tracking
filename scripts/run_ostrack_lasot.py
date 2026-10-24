@@ -61,6 +61,10 @@ def main():
     p.add_argument("--yolo", default=None, metavar="WEIGHTS",
                    help="with --reloc-verify: YOLO-World weights (e.g. yolov8s-worldv2.pt); its detections of the "
                         "video's class are added to the re-localization candidates (src/tracker/detector.py)")
+    p.add_argument("--occlusion-warning", choices=["off", "both", "score"], default="off",
+                   help="with re-localization: early occlusion warning that freezes the target memory and makes "
+                        "moves easier; 'both' = V-JEPA predictor surprise + score drop (cache from "
+                        "cache_vjepa.py --surprise), 'score' = score drop only (control)")
     p.add_argument("--surprise-gate", action="store_true",
                    help="re-localize only after the V-JEPA predictor was surprised at the target "
                         "(cache from cache_vjepa.py --surprise)")
@@ -124,7 +128,7 @@ def main():
             trained = a.fusion or a.prior
             if not trained or a.reloc_verify > 0 or a.prior:  # the prior needs the relocalizer's memory
                 params = RelocParams(candidates=max(a.reloc_verify, 1), surprise_gate=a.surprise_gate,
-                                     propose=not trained or a.reloc_verify > 0)
+                                     propose=not trained or a.reloc_verify > 0, warning=a.occlusion_warning)
                 if detector is not None:
                     detector.set_class(seq.rsplit("-", 1)[0])
                 hook = VJEPARelocalizer(cache, w, h, gt[0], params, detector=detector)
