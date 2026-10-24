@@ -57,6 +57,26 @@ class VJEPAPredictor(VJEPAEncoder):
         surprise = 1 - torch.nn.functional.cosine_similarity(pred, real, dim=-1)       # (B, 256)
         return real.view(len(clips), g, g, -1).half(), surprise.view(len(clips), g, g).half()
 
+    @torch.no_grad()
+    def target_surprise(self, x: torch.Tensor, box, frame_w: int, frame_h: int, real_last: torch.Tensor) -> float:
+        """Hide only the target's box in the last slot of clip x and predict it from everything else
+        (the earlier slots AND the current surroundings, so camera motion is explained by the context).
+        real_last: (G, G, C) encoder map of that slot (the cached map). -> 1 - cos(predicted, real),
+        both pooled over the hidden tokens."""
+        g, slots = self.grid, x.shape[1] // self.tubelet
+        hide = self.box_tokens(box, frame_w, frame_h, slots - 1)
+        pred = self.predict(x, np.setdiff1d(np.arange(slots * g * g), hide), hide).mean(0)
+        real = real_last.reshape(g * g, -1)[hide - (slots - 1) * g * g].float().mean(0)
+        return float(1 - torch.nn.functional.cosine_similarity(pred, real, dim=0))
+
+    @torch.no_grad()
+    def future_map(self, x: torch.Tensor, ahead: int = 2) -> torch.Tensor:
+        """Predict the slot `ahead` steps after the end of clip x (2 frames per slot) from the whole clip:
+        (G, G, C) - where the scene, and the target in it, is expected to be."""
+        g, slots = self.grid, x.shape[1] // self.tubelet
+        future = self.slot_tokens(slots - 1 + ahead)
+        return self.predict(x, np.arange(slots * g * g), future).view(g, g, -1)
+
     def slot_tokens(self, slot: int) -> np.ndarray:
         g = self.grid
         return slot * g * g + np.arange(g * g)

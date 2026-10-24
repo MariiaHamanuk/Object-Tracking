@@ -41,6 +41,8 @@ def main():
     p.add_argument("--stride", type=int, default=2)
     p.add_argument("--batch", type=int, default=4, help="clips per forward pass")
     p.add_argument("--surprise", action="store_true", help="also store the predictor's surprise map")
+    p.add_argument("--surprise-out", type=Path, default=None,
+                   help="also save frames + surprise maps alone (~150 KB per video) here, to keep them")
     p.add_argument("--out", type=Path, default=REPO_ROOT / "cache" / "vjepa")
     p.add_argument("--work", type=Path, default=REPO_ROOT / "tmp_frames")
     p.add_argument("--shard", type=int, default=0)
@@ -82,6 +84,9 @@ def main():
                 del cache[i]
         extra = dict(surprise=np.concatenate(surprise)) if a.surprise else {}
         np.savez(a.out / f"{seq}.npz", frames=ts, maps=np.concatenate(maps), **extra)
+        if a.surprise and a.surprise_out:
+            a.surprise_out.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(a.surprise_out / f"{seq}.npz", frames=ts, surprise=extra["surprise"])
         shutil.rmtree(seq_dir, ignore_errors=True)
         n_maps += len(ts)
         el = time.time() - t0

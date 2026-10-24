@@ -1,0 +1,17 @@
+{
+  "data": "/kaggle/tmp/fusion_data/motion",
+  "checkpoint": "/kaggle/working/OSTrack_ep0300.pth.tar",
+  "config": "vitb_256_mae_ce_32x4_ep300",
+  "out": "/kaggle/working/output/fusion_v2a",
+  "epochs": "15",
+  "batch": "32",
+  "lr": "0.001",
+  "weight_decay": "0.0001",
+  "val_frac": "0.1",
+  "seed": "0",
+  "train_head": "none",
+  "head_lr": "1e-05",
+  "negatives": "True",
+  "distill": "1.0",
+  "prior": "AB"
+}

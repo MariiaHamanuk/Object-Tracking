@@ -1,0 +1,66 @@
+{
+  "results": "results_raw\\ostrack_fusion_v2a_reloc_verify\\lasot",
+  "split": "configs\\splits\\dev_occlusion.txt",
+  "window": 30,
+  "iou_thr": 0.5,
+  "lock_window": 10,
+  "overall": {
+    "AUC": 57.79822925774199,
+    "OP50": 67.90293361532032,
+    "OP75": 55.1776109045669,
+    "Precision": 64.43362448921654,
+    "NormPrecision": 65.8253398316624,
+    "n_sequences": 40
+  },
+  "videos_with_absence": {
+    "AUC": 57.79822925774199,
+    "OP50": 67.90293361532032,
+    "OP75": 55.1776109045669,
+    "Precision": 64.43362448921654,
+    "NormPrecision": 65.8253398316624,
+    "n_sequences": 40
+  },
+  "videos_without_absence": {
+    "n_sequences": 0
+  },
+  "occlusion": {
+    "n_episodes": 419,
+    "n_locked_before": 213,
+    "ORR": 62.91079812206573,
+    "ORR_all": 44.39140811455847,
+    "median_frames_to_recover": 2.0,
+    "mean_iou_after": 42.664150809663504,
+    "ORR_by_length": {
+      "1-5": {
+        "n": 63,
+        "ORR": 71.42857142857143
+      },
+      "6-30": {
+        "n": 87,
+        "ORR": 65.51724137931035
+      },
+      "31-150": {
+        "n": 56,
+        "ORR": 53.57142857142857
+      },
+      ">150": {
+        "n": 7,
+        "ORR": 28.57142857142857
+      }
+    },
+    "ORR_by_kind": {
+      "both": {
+        "n": 4,
+        "ORR": 75.0
+      },
+      "full_occlusion": {
+        "n": 114,
+        "ORR": 61.40350877192983
+      },
+      "out_of_view": {
+        "n": 95,
+        "ORR": 64.21052631578948
+      }
+    }
+  }
+}

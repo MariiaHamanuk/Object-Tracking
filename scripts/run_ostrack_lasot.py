@@ -61,10 +61,25 @@ def main():
     p.add_argument("--yolo", default=None, metavar="WEIGHTS",
                    help="with --reloc-verify: YOLO-World weights (e.g. yolov8s-worldv2.pt); its detections of the "
                         "video's class are added to the re-localization candidates (src/tracker/detector.py)")
-    p.add_argument("--occlusion-warning", choices=["off", "both", "score"], default="off",
-                   help="with re-localization: early occlusion warning that freezes the target memory and makes "
-                        "moves easier; 'both' = V-JEPA predictor surprise + score drop (cache from "
-                        "cache_vjepa.py --surprise), 'score' = score drop only (control)")
+    p.add_argument("--occlusion-warning", default="off",
+                   choices=["off", "score", "both", "local", "rise", "online", "learned"],
+                   help="with re-localization: early occlusion warning that freezes the target memory "
+                        "(src/tracker/relocalize.py); 'score' = score drop only (control), the others add the "
+                        "V-JEPA predictor (cache from cache_vjepa.py --surprise; 'online' needs --online-predictor)")
+    p.add_argument("--warn-relax", action="store_true", help="while warned also make moves easier")
+    p.add_argument("--warn-weights", type=Path, default=None, help="json from scripts/fit_warning.py ('learned')")
+    p.add_argument("--online-predictor", action="store_true",
+                   help="run the V-JEPA predictor during tracking (target-only surprise; logged, and used by "
+                        "--occlusion-warning online / --future-candidates)")
+    p.add_argument("--future-candidates", type=int, default=0, metavar="K",
+                   help="with --online-predictor: K candidates from the predicted future map (while warned)")
+    p.add_argument("--memory-guard", type=float, default=0.0, metavar="Q",
+                   help="update the target memory only if the box still looks like the first appearance "
+                        "(similarity not in the bottom Q of the video's checks), e.g. 0.2")
+    p.add_argument("--drift-check", action="store_true",
+                   help="also propose when OSTrack is confident but V-JEPA sees the target clearly elsewhere")
+    p.add_argument("--motion", type=float, default=0.0,
+                   help="rank V-JEPA candidates by similarity - MOTION x distance to the predicted track, e.g. 0.2")
     p.add_argument("--surprise-gate", action="store_true",
                    help="re-localize only after the V-JEPA predictor was surprised at the target "
                         "(cache from cache_vjepa.py --surprise)")
@@ -107,6 +122,10 @@ def main():
         runner.enable_fusion(a.fusion, a.fusion_head)
     if a.prior:
         runner.enable_prior(a.prior)
+    online = None
+    if a.online_predictor:
+        from src.vjepa.online import OnlinePredictor
+        online = OnlinePredictor()
     detector = None
     if a.yolo:
         if not a.reloc_verify:
@@ -128,10 +147,14 @@ def main():
             trained = a.fusion or a.prior
             if not trained or a.reloc_verify > 0 or a.prior:  # the prior needs the relocalizer's memory
                 params = RelocParams(candidates=max(a.reloc_verify, 1), surprise_gate=a.surprise_gate,
-                                     propose=not trained or a.reloc_verify > 0, warning=a.occlusion_warning)
+                                     propose=not trained or a.reloc_verify > 0, warning=a.occlusion_warning,
+                                     warn_relax=a.warn_relax,
+                                     warn_weights=str(a.warn_weights) if a.warn_weights else None,
+                                     future_k=a.future_candidates, memory_guard=a.memory_guard,
+                                     drift_check=a.drift_check, motion=a.motion)
                 if detector is not None:
                     detector.set_class(seq.rsplit("-", 1)[0])
-                hook = VJEPARelocalizer(cache, w, h, gt[0], params, detector=detector)
+                hook = VJEPARelocalizer(cache, w, h, gt[0], params, detector=detector, online=online)
             if trained:
                 runner.set_vjepa(cache, w, h, memory=hook)
         res = runner.track(frames, gt[0], hook=hook, verify=a.reloc_verify > 0, verify_min=a.verify_min)
