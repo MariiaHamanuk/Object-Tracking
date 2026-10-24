@@ -1,0 +1,62 @@
+{
+  "results": "results_raw\\vjepa_only\\lasot",
+  "split": "configs\\splits\\dev_occlusion.txt",
+  "window": 30,
+  "iou_thr": 0.5,
+  "lock_window": 10,
+  "overall": {
+    "AUC": 4.32208642203769,
+    "OP50": 0.4052078201089337,
+    "OP75": 0.1943258848425142,
+    "Precision": 3.5350422708933174,
+    "NormPrecision": 2.231711358439411,
+    "n_sequences": 40
+  },
+  "videos_with_absence": {
+    "AUC": 4.32208642203769,
+    "OP50": 0.4052078201089337,
+    "OP75": 0.1943258848425142,
+    "Precision": 3.5350422708933174,
+    "NormPrecision": 2.231711358439411,
+    "n_sequences": 40
+  },
+  "videos_without_absence": {
+    "n_sequences": 0
+  },
+  "occlusion": {
+    "n_episodes": 419,
+    "n_locked_before": 2,
+    "ORR": 50.0,
+    "ORR_all": 0.7159904534606205,
+    "median_frames_to_recover": 10.0,
+    "mean_iou_after": 17.88754595566503,
+    "ORR_by_length": {
+      "1-5": {
+        "n": 0,
+        "ORR": null
+      },
+      "6-30": {
+        "n": 2,
+        "ORR": 50.0
+      },
+      "31-150": {
+        "n": 0,
+        "ORR": null
+      },
+      ">150": {
+        "n": 0,
+        "ORR": null
+      }
+    },
+    "ORR_by_kind": {
+      "full_occlusion": {
+        "n": 1,
+        "ORR": 100.0
+      },
+      "out_of_view": {
+        "n": 1,
+        "ORR": 0.0
+      }
+    }
+  }
+}

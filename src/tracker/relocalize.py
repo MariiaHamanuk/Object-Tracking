@@ -23,6 +23,9 @@ predictor to have been surprised recently at the last confident box: surprise th
 predicted vs the real "now", src/vjepa/predictor.py) above `surprise_ratio` x its running mean on
 confident frames, within the last `surprise_window` frames. A drop of OSTrack's score from blur or a
 scale change does not surprise the world model; a target vanishing behind something does.
+With a `detector` (src/tracker/detector.YOLODetector) the trigger is the same, but the candidates
+also include up to `yolo_k` detections outside the search window, ranked by V-JEPA similarity of
+their box to the memory: whole objects with real boxes. `log` records how many came from each source.
 Thresholds are fixed a priori, not tuned on the evaluation videos.
 """
 from __future__ import annotations
@@ -49,11 +52,16 @@ class RelocParams:
     surprise_gate: bool = False    # doubt also needs a recent surprise of the V-JEPA predictor
     surprise_ratio: float = 1.5    # "surprised" = box surprise above this x running mean on confident frames
     surprise_window: int = 64      # frames a surprise keeps the gate open
+    propose: bool = True           # False: only keep the target memory up to date (for the prior head)
+    yolo_k: int = 3                # with a detector: detections added to the candidates
 
 
 class VJEPARelocalizer:
-    def __init__(self, cache: VJEPACache, frame_w: int, frame_h: int, init_box, params: RelocParams = RelocParams()):
+    def __init__(self, cache: VJEPACache, frame_w: int, frame_h: int, init_box, params: RelocParams = RelocParams(),
+                 detector=None):
         self.cache, self.w, self.h, self.p = cache, frame_w, frame_h, params
+        self.detector = detector
+        self.needs_image = detector is not None  # OSTrackRunner.track then passes the frame
         self.cached = set(int(t) for t in cache.frames)
         self.m_first = F.normalize(self._pool(0, init_box), dim=0)
         self.m_recent = self.m_first.clone()
@@ -70,7 +78,7 @@ class VJEPARelocalizer:
     def _pool(self, t, box) -> torch.Tensor:
         return pool_box(self._map(t), box, self.w, self.h)
 
-    def __call__(self, i: int, box, score) -> np.ndarray | None:
+    def __call__(self, i: int, box, score, image=None) -> np.ndarray | None:
         confident = i == 0 or (np.isfinite(score) and score >= self.p.confident_score)
         if confident:
             self.last_box = np.asarray(box, dtype=float)
@@ -112,7 +120,7 @@ class VJEPARelocalizer:
             extra = dict(surprise=s_surp, surprised=bool(surprised))
             if self.p.surprise_gate:
                 doubt = doubt and i - self.last_surprise <= self.p.surprise_window
-        move = doubt and outside and s_best - s_box > self.p.margin
+        move = self.p.propose and doubt and outside and s_best - s_box > self.p.margin
         self.log.append(dict(frame=i, score=float(score), s_box=s_box, s_best=s_best, doubt=bool(doubt),
                              outside=outside, moved=bool(move), **extra))
         if not move:
@@ -128,4 +136,12 @@ class VJEPARelocalizer:
                 break
         w, h = self.last_box[2:]
         boxes = [np.array([cx - w / 2, cy - h / 2, w, h]) for cx, cy in (centre(r * g + c) for r, c in picked)]
-        return boxes[0] if self.p.candidates == 1 else np.stack(boxes)
+        n_yolo = 0
+        if self.detector is not None and image is not None:
+            dets = [d for d in self.detector(image) if d[2] > 1 and d[3] > 1 and is_outside(d[0] + d[2] / 2, d[1] + d[3] / 2)]
+            sims = [float(F.cosine_similarity(pool_box(fmap, d, self.w, self.h), m, dim=0)) for d in dets]
+            for k in np.argsort(sims)[::-1][: self.p.yolo_k]:
+                boxes.append(np.asarray(dets[k], dtype=float))
+                n_yolo += 1
+        self.log[-1].update(n_vjepa=len(picked), n_yolo=n_yolo)
+        return boxes[0] if self.p.candidates == 1 and n_yolo == 0 else np.stack(boxes)

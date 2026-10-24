@@ -58,12 +58,18 @@ def main():
                         "(0 = move to the best V-JEPA match without verification)")
     p.add_argument("--verify-min", type=float, default=0.0,
                    help="with --reloc-verify: OSTrack's score at the accepted candidate must also reach this")
+    p.add_argument("--yolo", default=None, metavar="WEIGHTS",
+                   help="with --reloc-verify: YOLO-World weights (e.g. yolov8s-worldv2.pt); its detections of the "
+                        "video's class are added to the re-localization candidates (src/tracker/detector.py)")
     p.add_argument("--surprise-gate", action="store_true",
                    help="re-localize only after the V-JEPA predictor was surprised at the target "
                         "(cache from cache_vjepa.py --surprise)")
     p.add_argument("--fusion", type=Path, default=None,
                    help="fusion.pth from scripts/train_fusion.py: use the trained fusion (needs --vjepa-cache); "
                         "re-localization is then off unless --reloc-verify is given")
+    p.add_argument("--prior", type=Path, default=None,
+                   help="prior.pth from scripts/train_fusion.py --prior: OSTrack's head reads the V-JEPA target "
+                        "memory prior (needs --vjepa-cache); re-localization only with --reloc-verify")
     p.add_argument("--fusion-head", type=Path, default=None,
                    help="head.pth from scripts/train_fusion.py --train-head (fine-tuned box head)")
     p.add_argument("--shard", type=int, default=0)
@@ -77,8 +83,10 @@ def main():
         seqs = sorted(read_split(a.sequences))
     else:
         seqs = a.sequences.split(",") if a.sequences else test_sequences()
-    if a.fusion and not a.vjepa_cache:
-        sys.exit("--fusion needs --vjepa-cache")
+    if (a.fusion or a.prior) and not a.vjepa_cache:
+        sys.exit("--fusion / --prior need --vjepa-cache")
+    if a.fusion and a.prior:
+        sys.exit("use either --fusion or --prior")
     if a.vjepa_cache:
         missing = [s for s in seqs if not (a.vjepa_cache / f"{s}.npz").exists()]
         if missing:
@@ -93,6 +101,14 @@ def main():
     runner = OSTrackRunner(a.checkpoint, a.config, save_dir=a.work / "ostrack_output")
     if a.fusion:
         runner.enable_fusion(a.fusion, a.fusion_head)
+    if a.prior:
+        runner.enable_prior(a.prior)
+    detector = None
+    if a.yolo:
+        if not a.reloc_verify:
+            sys.exit("--yolo needs --reloc-verify")
+        from src.tracker.detector import YOLODetector
+        detector = YOLODetector(a.yolo)
     t0, n_frames, failed = time.time(), 0, []
     for k, (seq, seq_dir, err) in enumerate(stream_sequences(todo, a.work / f"shard{a.shard}"), 1):
         if err is not None:
@@ -105,11 +121,15 @@ def main():
         if a.vjepa_cache:
             h, w = cv2.imread(str(frames[0])).shape[:2]
             cache = VJEPACache(a.vjepa_cache / f"{seq}.npz")
-            if a.fusion:
-                runner.set_vjepa(cache, w, h)
-            if not a.fusion or a.reloc_verify > 0:
-                params = RelocParams(candidates=max(a.reloc_verify, 1), surprise_gate=a.surprise_gate)
-                hook = VJEPARelocalizer(cache, w, h, gt[0], params)
+            trained = a.fusion or a.prior
+            if not trained or a.reloc_verify > 0 or a.prior:  # the prior needs the relocalizer's memory
+                params = RelocParams(candidates=max(a.reloc_verify, 1), surprise_gate=a.surprise_gate,
+                                     propose=not trained or a.reloc_verify > 0)
+                if detector is not None:
+                    detector.set_class(seq.rsplit("-", 1)[0])
+                hook = VJEPARelocalizer(cache, w, h, gt[0], params, detector=detector)
+            if trained:
+                runner.set_vjepa(cache, w, h, memory=hook)
         res = runner.track(frames, gt[0], hook=hook, verify=a.reloc_verify > 0, verify_min=a.verify_min)
         if hook is not None:
             pd.DataFrame(hook.log).to_csv(out / f"{seq}_reloc.csv", index=False)

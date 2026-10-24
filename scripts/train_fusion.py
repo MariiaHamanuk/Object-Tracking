@@ -13,11 +13,18 @@ negatives: focal loss against an all-zero heat map, no box loss, so the peak sco
 the target is not there. On visible frames the head is distilled to the original OSTrack's score map
 (--distill) so it does not forget what it knew.
 
+fusion_v2a (--prior A|AB --negatives): no feature fusion. OSTrack stays frozen and its score branch
+also reads 4 numbers per search token from the V-JEPA target memory (fusion.prior_tokens: similarity
+to the first / recent target, and whether something else in the frame looks more like it). Only the
+new zero-initialised layers learn (37 parameters for A, ~9.5k for AB), so there is little to overfit.
+
     python scripts/train_fusion.py --data cache/fusion_data/motion --checkpoint OSTrack_ep0300.pth.tar
     python scripts/train_fusion.py ... --train-head score --negatives --out output/fusion_v1h
+    python scripts/train_fusion.py ... --prior AB --negatives --out output/fusion_v2a
     python scripts/train_fusion.py ... --epochs 1 --batch 4                 # quick CPU check
 
-Writes <out>/fusion.pth (best validation loss; with --train-head also head.pth), history.csv and
+Writes <out>/fusion.pth (best validation loss; with --train-head also head.pth; with --prior
+prior.pth instead), history.csv and
 config.json. Validation also reports peak_auroc: how well the peak score separates samples with the
 target in the crop from samples without (0.5 = no idea).
 """
@@ -37,7 +44,7 @@ import torch.nn.functional as F
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-from src.tracker.fusion import FusedOSTrack, FusionV1, align_to_crop  # noqa: E402
+from src.tracker.fusion import FusedOSTrack, FusionV1, PriorOSTrack, align_to_crop, prior_tokens  # noqa: E402
 from src.tracker.ostrack import DEFAULT_CONFIG, setup_ostrack  # noqa: E402
 
 MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -50,7 +57,7 @@ def load_samples(data_dir: Path, negatives: bool) -> dict[str, np.ndarray]:
     for f in sorted(data_dir.glob("*.npz")):
         d = np.load(f)
         n = len(d["kind"])
-        part = {k: d[k] for k in keys}
+        part = {k: d[k] for k in keys + tuple(k for k in ("mem_first", "mem_recent") if k in d.files)}
         part["frame_wh"] = np.repeat(d["frame_wh"][None], n, 0)
         part["video"] = np.array([f.stem] * n)
         parts.append(part)
@@ -88,8 +95,13 @@ def batch_losses(model, cfg, d: dict, idx: np.ndarray, device, objectives, disti
     t_box = torch.from_numpy(d["template_box"][idx]).float().to(device)
     s_box = torch.from_numpy(d["search_box"][idx]).float().to(device)
     pos = torch.from_numpy(d["in_crop"][idx]).to(device)
-    v = align_to_crop(torch.from_numpy(d["vmap"][idx]).to(device), torch.from_numpy(d["crop"][idx]).float().to(device),
-                      torch.from_numpy(d["frame_wh"][idx]).float().to(device))
+    vmap, crop = torch.from_numpy(d["vmap"][idx]).to(device), torch.from_numpy(d["crop"][idx]).float().to(device)
+    wh = torch.from_numpy(d["frame_wh"][idx]).float().to(device)
+    if isinstance(model, PriorOSTrack):
+        v = prior_tokens(vmap, torch.from_numpy(d["mem_first"][idx]).to(device),
+                         torch.from_numpy(d["mem_recent"][idx]).to(device), crop, wh)
+    else:
+        v = align_to_crop(vmap, crop, wh)
     mask = generate_mask_cond(cfg, len(idx), device, t_box)
     with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
         out = model(template, search, v, ce_template_mask=mask)
@@ -154,6 +166,8 @@ def main():
     p.add_argument("--head-lr", type=float, default=1e-5)
     p.add_argument("--negatives", action="store_true", help="train on samples without the target in the crop")
     p.add_argument("--distill", type=float, default=1.0, help="weight of the distillation to OSTrack's head")
+    p.add_argument("--prior", choices=["A", "AB"], default=None,
+                   help="fusion_v2a: train only the V-JEPA memory prior in the score head (no feature fusion)")
     a = p.parse_args()
 
     torch.manual_seed(a.seed)
@@ -167,10 +181,15 @@ def main():
     cfg = parameters(a.config).cfg
     net = build_ostrack(cfg, training=False)
     net.load_state_dict(torch.load(a.checkpoint, map_location="cpu")["net"], strict=True)
-    model = FusedOSTrack(net, FusionV1(), train_head=a.train_head).to(device)
+    if a.prior:
+        model = PriorOSTrack(net, a.prior).to(device)
+    else:
+        model = FusedOSTrack(net, FusionV1(), train_head=a.train_head).to(device)
     objectives = dict(focal=FocalLoss(), giou=giou_loss)
 
     d = load_samples(a.data, a.negatives)
+    if a.prior and "mem_first" not in d:
+        sys.exit("--prior needs samples with mem_first / mem_recent (re-run prepare_fusion_data.py)")
     # hold out whole videos so validation never sees frames of a training video
     is_val = np.array([zlib.crc32(v.encode()) % 1000 < a.val_frac * 1000 for v in d["video"]])
     if is_val.all() or not is_val.any():  # tiny runs: make sure both sides get at least one video
@@ -178,16 +197,23 @@ def main():
     tr, va = np.flatnonzero(~is_val), np.flatnonzero(is_val)
     print(f"train {len(tr)} samples / val {len(va)} samples ({len(set(d['video'][va]))} videos) on {device}")
 
-    head = [q for q in model.net.box_head.parameters() if q.requires_grad]
-    groups = [dict(params=list(model.fusion.parameters()), lr=a.lr)] + ([dict(params=head, lr=a.head_lr)] if head else [])
+    if a.prior:
+        head, groups = [], [dict(params=model.prior_head.new_parameters(), lr=a.lr)]
+    else:
+        head = [q for q in model.net.box_head.parameters() if q.requires_grad]
+        groups = [dict(params=list(model.fusion.parameters()), lr=a.lr)] + ([dict(params=head, lr=a.head_lr)] if head else [])
     params = [q for g in groups for q in g["params"]]
-    print(f"trainable: fusion {sum(q.numel() for q in model.fusion.parameters()) / 1e6:.2f}M, "
+    print(f"trainable: {sum(q.numel() for q in groups[0]['params'])} new parameters, "
           f"head {sum(q.numel() for q in head) / 1e6:.2f}M", flush=True)
     opt = torch.optim.AdamW(groups, weight_decay=a.weight_decay)
     steps = a.epochs * max(1, int(np.ceil(len(tr) / a.batch)))
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[g["lr"] for g in groups], total_steps=steps, pct_start=0.1)
 
     def save():
+        if a.prior:
+            new = {n: q for n, q in model.prior_head.state_dict().items() if not n.startswith("head.")}
+            torch.save(dict(mode=a.prior, prior_head=new), a.out / "prior.pth")
+            return
         torch.save(model.fusion.state_dict(), a.out / "fusion.pth")
         if head:
             torch.save(model.net.box_head.state_dict(), a.out / "head.pth")

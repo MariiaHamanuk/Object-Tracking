@@ -82,8 +82,47 @@ class OSTrackRunner:
         self.tracker.network = Network()
         self._record_scores()
 
-    def set_vjepa(self, cache, frame_w: int, frame_h: int):
+    def enable_prior(self, prior_weights: Path):
+        """Use OSTrack's head with the V-JEPA memory prior (src/tracker/fusion.PriorOSTrack, prior.pth
+        from train_fusion.py --prior). Call set_vjepa(cache, w, h, memory) for every video before
+        track(); `memory` is a VJEPARelocalizer passed as the hook too, which keeps m_first / m_recent."""
+        import torch
+        from src.tracker.fusion import PriorOSTrack
+
+        ckpt = torch.load(prior_weights, map_location="cpu")
+        model = PriorOSTrack(self.tracker.network, ckpt["mode"])
+        model.prior_head.load_state_dict(ckpt["prior_head"], strict=False)
+        device = next(self.tracker.network.parameters()).device
+        model = model.to(device).eval()
+        runner = self
+
+        class Network(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model, self.box_head = model, model.box_head
+
+            def forward(self, template, search, ce_template_mask=None, **kwargs):
+                return self.model(template, search, runner._prior(search.device), ce_template_mask)
+
+        self.tracker.network = Network()
+        self._record_scores()
+
+    def set_vjepa(self, cache, frame_w: int, frame_h: int, memory=None):
         self.vjepa = (cache, frame_w, frame_h)
+        self.memory = memory
+
+    def _prior(self, device):
+        """V-JEPA memory prior (fusion.prior_tokens) for the search region OSTrack is about to cut,
+        from the memory as it was after the previous frame (causal)."""
+        import torch
+        from src.tracker.fusion import prior_tokens, search_crop
+
+        cache, w, h = self.vjepa
+        fmap = torch.from_numpy(cache.at(self._frame).astype(np.float32))[None].to(device)
+        crop = torch.tensor([search_crop(self.tracker.state, self.tracker.params.search_factor)],
+                            dtype=torch.float32, device=device)
+        return prior_tokens(fmap, self.memory.m_first[None].to(device), self.memory.m_recent[None].to(device),
+                            crop, torch.tensor([[w, h]], dtype=torch.float32, device=device))
 
     def _vjepa_tokens(self, device):
         """V-JEPA map of the current frame resampled to the search region OSTrack is about to cut."""
@@ -121,7 +160,12 @@ class OSTrackRunner:
             else:
                 boxes[i] = self.tracker.track(image)["target_bbox"]
                 scores[i] = self.last_score
-            cands = hook(i, boxes[i], scores[i]) if hook is not None else None
+            if hook is None:
+                cands = None
+            elif getattr(hook, "needs_image", False):  # e.g. re-localization with a detector
+                cands = hook(i, boxes[i], scores[i], image)
+            else:
+                cands = hook(i, boxes[i], scores[i])
             if cands is not None:
                 cands = [cands] if np.ndim(cands) == 1 else list(cands)
                 if not verify:
@@ -130,7 +174,7 @@ class OSTrackRunner:
                 else:
                     best = self._verify(image, cands, boxes[i], scores[i], verify_min)
                     checks.append(dict(frame=i, score=float(scores[i]), n_candidates=len(cands),
-                                       best_score=best[1], accepted=best[0] is not None))
+                                       best_score=best[1], accepted=best[0] is not None, best_index=best[2]))
                     if best[0] is not None:
                         boxes[i], scores[i] = best[0], best[1]
                         moved.append(i)
@@ -140,12 +184,12 @@ class OSTrackRunner:
     def _verify(self, image, candidates, box, score, min_score: float = 0.0):
         """Run OSTrack around every candidate on the same frame; keep the best one only if OSTrack is
         more confident there than at its current box (and at least min_score). Leaves the tracker
-        state on the winner."""
-        best_box, best_score = None, float(score)
-        for c in candidates:
+        state on the winner. Returns (box or None, score, index of the winning candidate or -1)."""
+        best_box, best_score, best_idx = None, float(score), -1
+        for k, c in enumerate(candidates):
             self.tracker.state = [float(v) for v in c]
             out = self.tracker.track(image)["target_bbox"]
             if self.last_score > max(best_score, min_score):
-                best_box, best_score = np.asarray(out, dtype=float), float(self.last_score)
+                best_box, best_score, best_idx = np.asarray(out, dtype=float), float(self.last_score), k
         self.tracker.state = [float(v) for v in (best_box if best_box is not None else box)]
-        return best_box, best_score
+        return best_box, best_score, best_idx

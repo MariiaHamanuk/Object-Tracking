@@ -10,7 +10,9 @@ Per training video (configs/splits/train_fusion.txt) three kinds of samples:
 The template is a visible frame up to 100 frames earlier. Each sample stores the template / search
 crops exactly as OSTrack cuts them, the target box inside the search crop, the crop geometry and the
 FULL-frame V-JEPA map of the causal clip ending at the search frame (the crop part is resampled at
-training time; the full map is kept for fusion_v2).
+training time; the full map is kept for fusion_v2) and the target memory for the prior head
+(fusion.prior_tokens): `mem_first` = V-JEPA features pooled in the GT box of frame 0, `mem_recent` =
+pooled in the template box on the template frame (stands in for the tracker's EMA over confident frames).
 
     python scripts/prepare_fusion_data.py --max-videos 2 --per-video 4     # quick CPU check
     python scripts/prepare_fusion_data.py --shard 0 --num-shards 2          # Kaggle, one per GPU
@@ -38,7 +40,7 @@ from src.data.remote_zip import extract_frames, open_class_zip  # noqa: E402
 from src.eda.stats import runs  # noqa: E402
 from src.tracker.fusion import search_crop  # noqa: E402
 from src.tracker.ostrack import setup_ostrack  # noqa: E402
-from src.vjepa.encoder import DEFAULT_MODEL, VJEPAEncoder, clip_indices  # noqa: E402
+from src.vjepa.encoder import DEFAULT_MODEL, VJEPAEncoder, clip_indices, pool_box  # noqa: E402
 
 TEMPLATE_FACTOR, TEMPLATE_SIZE = 2.0, 128
 SEARCH_FACTOR, SEARCH_SIZE = 4.0, 256
@@ -133,7 +135,9 @@ def main():
                 continue
             clips = [[pl["t"]] * a.clip_len if a.static else clip_indices(pl["t"], a.clip_len, a.stride)
                      for pl in plans]
-            need = np.unique(np.r_[np.concatenate(clips), [pl["template_t"] for pl in plans]])
+            mem_clips = [clip_indices(0, a.clip_len, a.stride)] + [clip_indices(pl["template_t"], a.clip_len, a.stride)
+                                                                    for pl in plans]
+            need = np.unique(np.r_[np.concatenate(clips + mem_clips), [pl["template_t"] for pl in plans]])
             extract_frames(zips[cls], seq, need, work)
         except Exception as e:  # network trouble: skip, a re-run retries the video
             print(f"[{k}/{len(todo)}] {seq}: FAILED ({e})", flush=True)
@@ -163,11 +167,16 @@ def main():
             rec["kind"].append(pl["kind"])
             rec["t"].append(pl["t"])
             rec["in_crop"].append(0 <= cx <= 1 and 0 <= cy <= 1)
-        maps = []
-        for b in range(0, len(clips), a.batch):
-            maps.append(enc.encode_batch([[img(int(i)) for i in c] for c in clips[b:b + a.batch]]).numpy())
+        def encode(cl):
+            return np.concatenate([enc.encode_batch([[img(int(i)) for i in c] for c in cl[b:b + a.batch]]).numpy()
+                                   for b in range(0, len(cl), a.batch)])
+
+        mem_boxes = [s.boxes[0]] + [s.boxes[pl["template_t"]] for pl in plans]
+        mem = np.stack([pool_box(torch.from_numpy(m.astype(np.float32)), bx, w, h).numpy()
+                        for m, bx in zip(encode(mem_clips), mem_boxes)]).astype(np.float16)
         arrays = {k_: np.asarray(v) for k_, v in rec.items()}
-        np.savez(out / f"{seq}.npz", vmap=np.concatenate(maps), frame_wh=np.array([w, h]), **arrays)
+        np.savez(out / f"{seq}.npz", vmap=encode(clips), frame_wh=np.array([w, h]),
+                 mem_first=np.repeat(mem[:1], len(plans), 0), mem_recent=mem[1:], **arrays)
         shutil.rmtree(seq_dir, ignore_errors=True)
 
         n_total += len(plans)
