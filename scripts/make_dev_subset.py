@@ -1,7 +1,7 @@
-"""Pick the video subsets used during development.
+"""Write the dev (occlusion-dense test videos) and train subsets.
 
-    python scripts/make_dev_subset.py                    # test videos, occlusion-dense -> configs/splits/dev_occlusion.txt
-    python scripts/make_dev_subset.py --split train      # 4 train videos per class -> configs/splits/train_fusion.txt
+    python scripts/make_dev_subset.py
+    python scripts/make_dev_subset.py --split train
 """
 from __future__ import annotations
 

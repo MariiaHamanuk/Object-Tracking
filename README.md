@@ -1,68 +1,57 @@
 # Object-Tracking
 
-## Мета
-
-<!-- TODO: коротко описати задачу: покращення трекінгу (OSTrack) під час оклюзій за допомогою ембедингів V-JEPA -->
+Трекінг одного об'єкта на відео з оклюзіями: OSTrack, доповнений замороженою відеомоделлю V-JEPA 2
+(енкодер і предиктор). Дані: LaSOT.
 
 ## Структура
 
 ```
-Object-Tracking/
-├── README.md              # мета, як запустити, результати
-├── environment/           # окремі середовища для OSTrack і V-JEPA
-├── baselines/
-│   └── OSTrack/           # git submodule (форк botaoye/OSTrack)
-├── configs/               # yaml: baseline, fusion_v1, fusion_v2
-├── scripts/               # точки входу (запуск експериментів, кешування, оцінка)
-├── src/
-│   ├── data/              # парсинг LaSOT, вибір категорій, split, підвибірки
-│   ├── eda/               # скрипти й ноутбуки для EDA
-│   ├── vjepa/             # завантаження енкодера, кешування ембедингів
-│   ├── tracker/           # обгортка над OSTrack і наші зміни
-│   └── eval/              # метрики, occlusion recovery rate, розбивка за оклюзіями
-├── notebooks/             # лише для досліджень, не для основної логіки
-├── results/               # маленькі csv/json з метриками (комітяться)
-└── docs/                  # proposal, нотатки, постер
+baselines/OSTrack/   OSTrack (git submodule)
+configs/             yaml і списки відео (configs/splits)
+scripts/             запуск трекінгу, кешування V-JEPA, навчання, оцінка
+src/data/            LaSOT: читання анотацій, потокове завантаження з HuggingFace, підвибірки
+src/eda/             статистика й графіки для EDA
+src/vjepa/           енкодер і предиктор V-JEPA 2
+src/tracker/         обгортка над OSTrack, релокалізація, fusion, детектор
+src/eval/            AUC / P / NP, ORR
+notebooks/           ноутбуки для Kaggle
+results/             метрики (csv/json)
+docs/                proposal, опис інтеграції
 ```
 
-## Як запустити
+## Запуск
 
 ```bash
-# 1. Клонувати разом із сабмодулями
 git clone --recurse-submodules <repo-url>
-# або, якщо вже склоновано:
-git submodule update --init --recursive
-
-# 2. Середовища
 conda env create -f environment/ostrack.yml
 conda env create -f environment/vjepa.yml
 ```
 
-### EDA
+Експерименти запускаються на Kaggle (GPU T4 x2, Internet on): ноутбук клонує репозиторій, кадри LaSOT
+читаються з HuggingFace потоково, тому датасет підключати не треба. Основні ноутбуки:
+`notebooks/kaggle_final.ipynb` (фінальна система та абляції на dev) і
+`notebooks/kaggle_best_holdout.ipynb` (перевірка на 240 test-відео поза dev).
 
-EDA не потребує кадрів, тож 230 ГБ качати не треба. Скрипт читає zip-архіви з HuggingFace частинами
-і забирає лише анотації, кілька кадрів на відео, кількість кадрів, split і офіційні атрибути
-(~300 МБ на весь LaSOT, ~20–30 хв):
+Окремі кроки локально:
 
 ```bash
-python scripts/fetch_lasot_annotations.py        # усі 70 класів -> ./data (або $LASOT_ROOT)
-# потім відкрити src/eda/eda_lasot.ipynb
+python scripts/fetch_lasot_annotations.py                 # анотації для EDA і оцінки
+python scripts/cache_vjepa.py --sequences configs/splits/dev_occlusion.txt --surprise
+python scripts/run_ostrack_lasot.py --checkpoint OSTrack_ep0300.pth.tar \
+    --sequences configs/splits/dev_occlusion.txt --vjepa-cache cache/vjepa --reloc-verify 3 --verify-min 0.6
+python scripts/evaluate.py --results results_raw/<run>/lasot --name <run> --sequences configs/splits/dev_occlusion.txt
 ```
 
-Повторний запуск пропускає вже завантажені класи.
+## Набори відео
 
-<!-- TODO: команди для запуску baseline / fusion -->
+- `configs/splits/dev_occlusion.txt`: 40 test-відео з найбільшою кількістю оклюзій, по одному на клас; на
+  них порівнюються всі варіанти.
+- `configs/splits/test_holdout.txt`: решта 240 test-відео, лише для фінальної перевірки.
+- `configs/splits/train_fusion.txt`: 280 train-відео (4 на клас) для навчання fusion.
+- `configs/splits/warning_train.txt`: 40 train-відео для навченої тривоги про оклюзію.
 
-## Результати
+## Метрики
 
-Оцінка: `python scripts/evaluate.py --results <папка з <seq>.txt> --name <експеримент>`
-(протокол OSTrack/pytracking; ORR — частка епізодів зникнення цілі, після яких трекер знову на цілі
-(IoU > 0.5) протягом 30 кадрів, серед епізодів, де він був на цілі перед зникненням).
-
-| Метод | Вибірка | AUC | P | NP | ORR | ORR, оклюзія 31–150 кадрів |
-|---|---|---|---|---|---|---|
-| OSTrack-256 (результати авторів) | test, 280 | 69.11 | 75.22 | 78.68 | 72.3 | 50.6 |
-| OSTrack-256 (результати авторів) | dev_occlusion, 40 | 56.51 | 63.78 | 64.69 | 66.5 | 49.0 |
-
-`configs/splits/dev_occlusion.txt` — 40 test-відео з найбільшою щільністю оклюзій (по одному на клас),
-для розробки: `python scripts/make_dev_subset.py`.
+AUC, Precision (20 px) і Normalized Precision (0.2) за протоколом pytracking. ORR_all: частка всіх епізодів
+оклюзії, після яких трекер протягом 30 кадрів знову на цілі (IoU > 0.5). ORR: те саме лише для епізодів,
+де трекер був на цілі перед оклюзією.

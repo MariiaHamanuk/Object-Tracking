@@ -1,4 +1,4 @@
-"""Plot helpers (matplotlib only). Every function returns the Figure; pass `save=` to also write a PNG."""
+"""EDA plots; every function returns the figure and saves it with `save=`."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -21,7 +21,7 @@ def _finish(fig, save):
     return fig
 
 
-MAX_OVERLAID = 8  # with more classes, per-class overlays become unreadable -> pool or sort instead
+MAX_OVERLAID = 8  # more classes than this are pooled instead of overlaid
 
 
 def _classes(df):
@@ -34,7 +34,6 @@ def _class_ticks(ax, labels, axis="x"):
                                          rotation=90 if axis == "x" and len(labels) > 8 else 0)
 
 
-# --------------------------------------------------------------------------- size / aspect
 def plot_size_aspect(frames: pd.DataFrame, save=None):
     f = frames.dropna(subset=["rel_area"])
     cls = _classes(f)
@@ -55,7 +54,6 @@ def plot_size_aspect(frames: pd.DataFrame, save=None):
     return _finish(fig, save)
 
 
-# --------------------------------------------------------------------------- absence
 def plot_absence(seqs_df: pd.DataFrame, save=None):
     many = len(seqs_df) > 60
     d = seqs_df.sort_values("frac_absent" if many else ["cls", "frac_absent"], ascending=False).reset_index(drop=True)
@@ -79,7 +77,6 @@ def plot_absence(seqs_df: pd.DataFrame, save=None):
     return _finish(fig, save)
 
 
-# --------------------------------------------------------------------------- length / resolution
 def plot_length_resolution(seqs_df: pd.DataFrame, save=None):
     fig, ax = plt.subplots(1, 2, figsize=(12, 4))
     cls = _classes(seqs_df)
@@ -93,7 +90,6 @@ def plot_length_resolution(seqs_df: pd.DataFrame, save=None):
     return _finish(fig, save)
 
 
-# --------------------------------------------------------------------------- attributes
 def plot_attribute_counts(attr_counts: pd.DataFrame, title="Videos per attribute", save=None):
     fig, ax = plt.subplots(figsize=(10, 4))
     if len(attr_counts) <= MAX_OVERLAID:
@@ -106,7 +102,6 @@ def plot_attribute_counts(attr_counts: pd.DataFrame, title="Videos per attribute
 
 
 def plot_split_attributes(prev: pd.DataFrame, save=None):
-    """Attribute prevalence (% of videos) in train vs test; `prev` from stats.split_attribute_prevalence."""
     fig, ax = plt.subplots(figsize=(10, 4))
     prev[["train", "test"]].plot.bar(ax=ax)
     ax.set(ylabel="% of videos", title="Attribute prevalence: train vs test")
@@ -114,7 +109,6 @@ def plot_split_attributes(prev: pd.DataFrame, save=None):
 
 
 def plot_reappearance(re: pd.DataFrame, save=None):
-    """Where and how big the target is when it comes back; `re` from stats.reappearance_table."""
     fig, ax = plt.subplots(1, 3, figsize=(16, 4))
     ax[0].hist(np.log10(re.length), bins=40, color="gray")
     ax[0].set(xlabel="log10(episode length, frames)", ylabel="# episodes", title="Absence length")
@@ -130,7 +124,6 @@ def plot_reappearance(re: pd.DataFrame, save=None):
 
 
 def plot_coverage(cov: pd.DataFrame, save=None):
-    """Heatmap of test videos per class x attribute; zeros are outlined (blind spots)."""
     fig, ax = plt.subplots(figsize=(1 + 0.6 * cov.shape[1], 1 + 0.5 * cov.shape[0]))
     im = ax.imshow(cov.values, cmap="Blues", aspect="auto", vmin=0)
     ax.set(xticks=range(cov.shape[1]), xticklabels=cov.columns, yticks=range(cov.shape[0]), yticklabels=cov.index,
@@ -143,7 +136,6 @@ def plot_coverage(cov: pd.DataFrame, save=None):
     return _finish(fig, save)
 
 
-# --------------------------------------------------------------------------- temporal density
 def plot_temporal_density(dens_foc: pd.DataFrame, dens_oov: pd.DataFrame, save=None):
     fig, ax = plt.subplots(2, 2, figsize=(14, 8), gridspec_kw=dict(height_ratios=[3, 1]))
     for j, (name, d, cmap) in enumerate([("Full occlusion", dens_foc, "Reds"), ("Out of view", dens_oov, "Blues")]):
@@ -170,15 +162,12 @@ def plot_episodes(episodes: pd.DataFrame, save=None):
     return _finish(fig, save)
 
 
-# --------------------------------------------------------------------------- sanity check
 def show_samples(seq, n=4, save=None):
-    """Draw GT boxes on n evenly spaced frames (absent frames get a red border)."""
     from PIL import Image
     imgs = sorted((seq.path / "img").glob("*"))
     idx = np.linspace(0, seq.n_frames - 1, n).astype(int)
     fig, ax = plt.subplots(1, n, figsize=(4 * n, 3.5))
     for a, i in zip(np.atleast_1d(ax), idx):
-        # LaSOT frames are 00000001.jpg, ...; with only sampled frames on disk, pick by name
         img = seq.path / "img" / f"{i + 1:08d}.jpg"
         a.imshow(Image.open(img if img.exists() else imgs[min(i, len(imgs) - 1)]))
         x, y, w, h = seq.boxes[i]

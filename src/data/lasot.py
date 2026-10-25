@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-GT_NAMES = ("groundtruth.txt", "ground_truth.txt")  # official name vs. the one in your copy
+GT_NAMES = ("groundtruth.txt", "ground_truth.txt")
 IMG_EXT = (".jpg", ".jpeg", ".png")
 
 
@@ -17,9 +17,9 @@ class Sequence:
     cls: str
     name: str
     path: Path
-    boxes: np.ndarray            # (N, 4) x, y, w, h  (absent frames are usually 0,0,0,0)
-    full_occ: np.ndarray         # (N,) uint8
-    out_view: np.ndarray         # (N,) uint8
+    boxes: np.ndarray            # (N, 4) x, y, w, h
+    full_occ: np.ndarray
+    out_view: np.ndarray
     nlp: str
     n_images: int
     frame_size: tuple = (np.nan, np.nan)   # (W, H)
@@ -39,7 +39,6 @@ class Sequence:
 
     @property
     def valid_box(self) -> np.ndarray:
-        """Target present AND box has positive size."""
         return self.present & (self.boxes[:, 2] > 0) & (self.boxes[:, 3] > 0)
 
 
@@ -53,7 +52,6 @@ def _read_numbers(path: Path) -> list[list[float]]:
 
 
 def _read_flags(path: Path) -> np.ndarray:
-    # LaSOT stores flags as one comma-separated line; also tolerate one-per-line.
     vals = [v for row in _read_numbers(path) for v in row]
     return np.array(vals, dtype=np.uint8)
 
@@ -95,8 +93,8 @@ def load_sequence(seq_dir: Path, read_image_size: bool = True) -> Sequence:
     size = (np.nan, np.nan)
     if read_image_size and imgs:
         with Image.open(imgs[0]) as im:
-            size = im.size  # (W, H)
-    # scripts/fetch_lasot_annotations.py keeps only a few frames and stores the real count here
+            size = im.size
+    # written by scripts/fetch_lasot_annotations.py, which keeps only a few frames
     count_file = seq_dir / "n_images.txt"
     n_images = int(count_file.read_text()) if count_file.exists() else len(imgs)
 
@@ -108,15 +106,12 @@ def load_sequence(seq_dir: Path, read_image_size: bool = True) -> Sequence:
         issues.append(f"images={n_images} != boxes={n}")
     if boxes.shape[1] != 4:
         issues.append(f"boxes have {boxes.shape[1]} columns")
-    # align flag lengths so downstream code does not crash; the issue stays recorded
     foc = np.resize(foc, n) if len(foc) != n else foc
     oov = np.resize(oov, n) if len(oov) != n else oov
 
     s = Sequence(cls, seq_dir.name, seq_dir, boxes, foc, oov, nlp, n_images, size, issues)
     if (s.present & ~s.valid_box).any():
         s.issues.append(f"{int((s.present & ~s.valid_box).sum())} 'present' frames with empty box")
-    # Not an issue: LaSOT keeps a non-empty box on ~73% of absent frames. Absent
-    # frames are excluded via `absent`/`valid_box`, and the OSTrack protocol does the same.
     return s
 
 
@@ -128,14 +123,14 @@ def load_classes(root: Path, classes: list[str], read_image_size: bool = True) -
 
 
 def read_split(path) -> set[str] | None:
-    """One sequence name per line. Returns None if the file is missing."""
+    """Sequence names, one per line; None if the file is missing."""
     if path is None or not Path(path).exists():
         return None
     return {l.strip() for l in Path(path).read_text().splitlines() if l.strip()}
 
 
 def load_attribute_matrix(att_dir, seq_names) -> pd.DataFrame:
-    """Raw official attributes: index = sequence, columns 0..13 (file order), bool values."""
+    """Official attributes: index = sequence, columns 0..13 in file order."""
     rows, missing = {}, []
     for n in seq_names:
         p = Path(att_dir) / f"{n}.txt"

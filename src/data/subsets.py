@@ -1,4 +1,4 @@
-"""Subsets of LaSOT for development (proposal, risk 3: 30-50 occlusion-dense test videos for debugging)."""
+"""Dev and train subsets of LaSOT."""
 from __future__ import annotations
 
 import pandas as pd
@@ -8,7 +8,7 @@ from src.eda.stats import runs
 
 
 def occlusion_profile(seqs: list[Sequence], min_len: int = 6) -> pd.DataFrame:
-    """Per video: absence episodes the target comes back from, and how many last >= min_len frames."""
+    """Per video: absence episodes the target returns from, and how many last >= min_len frames."""
     rows = []
     for s in seqs:
         starts, lengths = runs(s.absent)
@@ -20,15 +20,13 @@ def occlusion_profile(seqs: list[Sequence], min_len: int = 6) -> pd.DataFrame:
 
 
 def train_subset(profile: pd.DataFrame, per_class: int = 4) -> pd.DataFrame:
-    """Class-balanced training subset (proposal §3): `per_class` videos per class, preferring videos with
-    occlusions (the fusion has to learn from them) but keeping occlusion-free ones when a class has few."""
+    """`per_class` videos per class, videos with occlusions first."""
     ranked = profile.sort_values(["n_long", "n_episodes", "frac_absent"], ascending=False)
     return ranked.groupby("cls").head(per_class).sort_values("seq", key=lambda s: s.str.lower())
 
 
 def dev_occlusion_subset(profile: pd.DataFrame, n: int = 40, max_per_class: int = 1) -> pd.DataFrame:
-    """Most occlusion-dense videos, at most `max_per_class` per class so categories stay balanced.
-    Ranked by episodes >= 1 s, then episodes >= min_len, then fraction of absent frames."""
+    """Most occlusion-dense videos, at most `max_per_class` per class."""
     ranked = profile[profile.n_long > 0].sort_values(["n_very_long", "n_long", "frac_absent"], ascending=False)
     picked = ranked.groupby("cls").head(max_per_class).head(n)
     return picked.sort_values("seq", key=lambda s: s.str.lower())

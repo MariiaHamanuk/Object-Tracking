@@ -1,32 +1,10 @@
-"""Train the V-JEPA fusion module on samples from scripts/prepare_fusion_data.py.
+"""Train the fusion module, optionally the score head (--train-head) or only the prior head (--prior).
 
-OSTrack's backbone and V-JEPA stay frozen; src/tracker/fusion.FusionV1 (~2.6M params) learns with
-OSTrack's own losses (focal on the centre map + 2 x GIoU + 5 x L1). Validation is on held-out VIDEOS;
-epoch 0 is evaluated before any update, i.e. it is exactly OSTrack.
-
-fusion_v1 (defaults): the box head is frozen and samples whose target is not in the search crop are
-skipped - the head has no way to say "not here", so it confidently picks a distractor.
-
-fusion_v1h (--train-head score --negatives): the score branch of the head is fine-tuned too
-(--head-lr, 10x lower), and samples without the target in the crop (hidden, or outside it) are
-negatives: focal loss against an all-zero heat map, no box loss, so the peak score should drop when
-the target is not there. On visible frames the head is distilled to the original OSTrack's score map
-(--distill) so it does not forget what it knew.
-
-fusion_v2a (--prior A|AB --negatives): no feature fusion. OSTrack stays frozen and its score branch
-also reads 4 numbers per search token from the V-JEPA target memory (fusion.prior_tokens: similarity
-to the first / recent target, and whether something else in the frame looks more like it). Only the
-new zero-initialised layers learn (37 parameters for A, ~9.5k for AB), so there is little to overfit.
+OSTrack's losses (focal + 2 GIoU + 5 L1); validation on held-out videos, epoch 0 = plain OSTrack.
 
     python scripts/train_fusion.py --data cache/fusion_data/motion --checkpoint OSTrack_ep0300.pth.tar
     python scripts/train_fusion.py ... --train-head score --negatives --out output/fusion_v1h
-    python scripts/train_fusion.py ... --prior AB --negatives --out output/fusion_v2a
-    python scripts/train_fusion.py ... --epochs 1 --batch 4                 # quick CPU check
-
-Writes <out>/fusion.pth (best validation loss; with --train-head also head.pth; with --prior
-prior.pth instead), history.csv and
-config.json. Validation also reports peak_auroc: how well the peak score separates samples with the
-target in the crop from samples without (0.5 = no idea).
+    python scripts/train_fusion.py ... --prior AB --negatives --lr 1e-3 --out output/fusion_v2a
 """
 from __future__ import annotations
 
@@ -49,7 +27,7 @@ from src.tracker.ostrack import DEFAULT_CONFIG, setup_ostrack  # noqa: E402
 
 MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-LOSS_WEIGHTS = dict(focal=1.0, giou=2.0, l1=5.0)  # OSTrack: cfg.TRAIN.GIOU_WEIGHT / L1_WEIGHT, focal 1
+LOSS_WEIGHTS = dict(focal=1.0, giou=2.0, l1=5.0)  # as in OSTrack's config
 
 
 def load_samples(data_dir: Path, negatives: bool) -> dict[str, np.ndarray]:
@@ -122,7 +100,7 @@ def batch_losses(model, cfg, d: dict, idx: np.ndarray, device, objectives, disti
     losses["total"] = sum(LOSS_WEIGHTS[k] * losses[k] for k in LOSS_WEIGHTS)
     normal = pos & torch.from_numpy(d["kind"][idx] == 0).to(device)
     if distill > 0 and "teacher_score_map" in out and normal.any():
-        # x100: score maps are in 0..1 and mostly ~0, so the raw MSE is ~1e-3
+        # score maps are mostly ~0, so the raw MSE is ~1e-3
         losses["distill"] = F.mse_loss(score_map[normal], out["teacher_score_map"].float()[normal]) * 100
         losses["total"] = losses["total"] + distill * losses["distill"]
     losses["iou"] = iou.detach()
@@ -140,7 +118,7 @@ def evaluate(model, cfg, d, idx, device, objectives, batch) -> dict:
         ious.append(l["iou"].cpu().numpy())
         peaks.append(l["peak"].cpu().numpy())
     iou, peak, pos = np.concatenate(ious), np.concatenate(peaks), d["in_crop"][idx]
-    kind = d["kind"][idx][pos]  # iou is only defined for positives
+    kind = d["kind"][idx][pos]
     return dict(loss=sum(tot) / len(idx), iou=float(iou.mean()),
                 iou_occlusion=float(iou[kind == 1].mean()) if (kind == 1).any() else np.nan,
                 iou_normal=float(iou[kind == 0].mean()) if (kind == 0).any() else np.nan,
@@ -190,9 +168,9 @@ def main():
     d = load_samples(a.data, a.negatives)
     if a.prior and "mem_first" not in d:
         sys.exit("--prior needs samples with mem_first / mem_recent (re-run prepare_fusion_data.py)")
-    # hold out whole videos so validation never sees frames of a training video
+    # hold out whole videos
     is_val = np.array([zlib.crc32(v.encode()) % 1000 < a.val_frac * 1000 for v in d["video"]])
-    if is_val.all() or not is_val.any():  # tiny runs: make sure both sides get at least one video
+    if is_val.all() or not is_val.any():
         is_val = d["video"] == d["video"][0]
     tr, va = np.flatnonzero(~is_val), np.flatnonzero(is_val)
     print(f"train {len(tr)} samples / val {len(va)} samples ({len(set(d['video'][va]))} videos) on {device}")
@@ -225,7 +203,7 @@ def main():
                                                    evaluate(model, cfg, d, va, device, objectives, a.batch).items()})]
     print("epoch 0 (= OSTrack):", {k: round(v, 4) for k, v in history[0].items() if k.startswith("val")}, flush=True)
     best = history[0]["val_loss"]
-    save()  # zero-init fusion + original head = baseline, in case nothing improves
+    save()
     rng = np.random.default_rng(a.seed)
     for ep in range(1, a.epochs + 1):
         model.train()

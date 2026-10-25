@@ -1,4 +1,4 @@
-"""Pure functions that turn parsed LaSOT sequences into DataFrames (no plotting here)."""
+"""LaSOT statistics as DataFrames."""
 from __future__ import annotations
 
 import numpy as np
@@ -8,7 +8,7 @@ from src import config as C
 from src.data.lasot import Sequence
 
 ATTRIBUTES = ["CM", "VC", "ROT", "SV", "DEF", "BC", "POC", "FOC", "MB", "IV", "ARC", "OV", "LR", "FM"]
-DERIVED_ATTRS = ["SV", "ARC", "LR", "FM", "FOC", "OV"]  # computable from annotations alone
+DERIVED_ATTRS = ["SV", "ARC", "LR", "FM", "FOC", "OV"]  # computable from the annotations
 
 
 def runs(mask: np.ndarray):
@@ -20,7 +20,6 @@ def runs(mask: np.ndarray):
     return starts, ends - starts
 
 
-# --------------------------------------------------------------------------- per-sequence
 def sequence_table(seqs: list[Sequence], fps: int = C.FPS) -> pd.DataFrame:
     rows = []
     for s in seqs:
@@ -46,7 +45,6 @@ def sequence_table(seqs: list[Sequence], fps: int = C.FPS) -> pd.DataFrame:
     return df
 
 
-# --------------------------------------------------------------------------- per-frame
 def frame_table(seqs: list[Sequence]) -> pd.DataFrame:
     parts = []
     for s in seqs:
@@ -78,12 +76,8 @@ def frame_table(seqs: list[Sequence]) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True)
 
 
-# --------------------------------------------------------------------------- attributes
 def derived_attributes(frames: pd.DataFrame, seqs_df: pd.DataFrame) -> pd.DataFrame:
-    """Proxy attributes computed from annotations (paper Table 2 definitions).
-
-    Only SV, ARC, LR, FM, FOC, OV can be derived. The remaining eight (CM, VC, ROT, DEF, BC,
-    POC, MB, IV) need the official per-sequence labels."""
+    """SV, ARC, LR, FM, FOC, OV from the annotations (LaSOT paper, Table 2)."""
     g = frames.groupby("seq")
     lo, hi = C.SV_RANGE
     alo, ahi = C.ARC_RANGE
@@ -99,9 +93,7 @@ def derived_attributes(frames: pd.DataFrame, seqs_df: pd.DataFrame) -> pd.DataFr
 
 
 def check_attribute_columns(raw: pd.DataFrame, derived: pd.DataFrame) -> pd.DataFrame:
-    """Agreement (0..1) between each raw file column (rows) and each attribute we can derive (columns).
-    FOC and OV should match exactly one column each at ~1.0 -> use them to confirm the column order.
-    With few sequences (e.g. only `person`) constant columns can match by chance: read with care."""
+    """Agreement between each raw attribute column and each derived attribute (checks the column order)."""
     common = raw.index.intersection(derived.index)
     out = pd.DataFrame({a: [(raw.loc[common, c] == derived.loc[common, a]).mean() for c in raw.columns]
                         for a in DERIVED_ATTRS}, index=raw.columns)
@@ -117,8 +109,7 @@ def name_attribute_columns(raw: pd.DataFrame, order: list[str]) -> pd.DataFrame:
 
 
 def merge_official_attributes(derived: pd.DataFrame, official: pd.DataFrame | None) -> pd.DataFrame:
-    """`official`: index = sequence name, boolean columns named like ATTRIBUTES.
-    Official labels win over derived ones where both exist."""
+    """Official labels override the derived ones."""
     if official is None:
         return derived
     out = derived.copy()
@@ -133,14 +124,13 @@ def attribute_counts(attr: pd.DataFrame) -> pd.DataFrame:
 
 
 def coverage_table(attr: pd.DataFrame, test_names: set[str]) -> pd.DataFrame:
-    """Class x attribute: number of TEST videos having the attribute (0 = blind spot)."""
+    """Class x attribute: number of test videos with the attribute."""
     t = attr[attr.index.isin(test_names)]
     return attribute_counts(t)
 
 
-# --------------------------------------------------------------------------- occlusion timing
 def temporal_density(seqs: list[Sequence], kind: str = "full_occ", bins: int = 50) -> pd.DataFrame:
-    """Rows = sequences, columns = normalised-time bins; value = fraction of frames absent in the bin."""
+    """Fraction of absent frames per video and normalised-time bin."""
     rows, names = [], []
     for s in seqs:
         mask = getattr(s, kind).astype(float)
@@ -155,9 +145,7 @@ REAPPEAR_LABELS = ["1-5", "6-30", "31-150", ">150"]
 
 
 def reappearance_table(seqs: list[Sequence]) -> pd.DataFrame:
-    """One row per absence episode the target comes back from: how far (in box sizes) and how much
-    bigger/smaller it is on the first visible frame compared with the last one before it vanished.
-    This is what a tracker searching only near the last position has to cope with."""
+    """Per absence episode: displacement (in box sizes) and scale change between vanishing and reappearing."""
     rows = []
     for s in seqs:
         starts, lengths = runs(s.absent)
@@ -176,7 +164,7 @@ def reappearance_table(seqs: list[Sequence]) -> pd.DataFrame:
 
 
 def split_attribute_prevalence(attr: pd.DataFrame, test_names: set[str]) -> pd.DataFrame:
-    """% of videos with each attribute in train vs test (are the 280 test videos representative?)."""
+    """% of videos with each attribute in train vs test."""
     a = attr.drop(columns="cls").astype(bool)
     is_test = a.index.isin(test_names)
     out = pd.DataFrame({"train": a[~is_test].mean() * 100, "test": a[is_test].mean() * 100})

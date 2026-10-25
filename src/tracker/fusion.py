@@ -1,14 +1,4 @@
-"""Feature-level fusion of V-JEPA 2 maps into OSTrack (fusion_v1, see docs/vjepa_integration.md).
-
-OSTrack's backbone and box head stay frozen. Between them, every one of the 16 x 16 search tokens gets
-the V-JEPA token from the same place of the frame added through a small residual MLP:
-
-    x' = x + MLP([x ; P(v)])        (last MLP layer zero-initialised -> x' = x before training)
-
-V-JEPA maps cover the whole (squashed) frame, so the part under OSTrack's search crop is resampled
-to the 16 x 16 search grid with `align_to_crop`. Note: OSTrack's candidate elimination zeroes ~66% of
-the search tokens it considers background; the fusion adds V-JEPA features to those as well.
-"""
+"""V-JEPA features inside OSTrack: feature fusion (v1, v1h) and the target-memory prior head (v2a)."""
 from __future__ import annotations
 
 import copy
@@ -21,31 +11,29 @@ import torch.nn.functional as F
 
 
 def search_crop(box, factor: float = 4.0) -> tuple[float, float, float]:
-    """OSTrack's square crop around a box (lib/train/data/processing_utils.sample_target): (x1, y1, side)."""
+    """OSTrack's square search crop around a box: (x1, y1, side)."""
     x, y, w, h = box
     side = math.ceil(math.sqrt(w * h) * factor)
     return round(x + 0.5 * w - side * 0.5), round(y + 0.5 * h - side * 0.5), side
 
 
 def align_to_crop(fmap: torch.Tensor, crops: torch.Tensor, frame_wh: torch.Tensor, out: int = 16) -> torch.Tensor:
-    """Resample full-frame maps to the search crops.
-
-    fmap: (B, G, G, C) V-JEPA maps of the whole frame; crops: (B, 3) = x1, y1, side in pixels;
-    frame_wh: (B, 2). Returns (B, out*out, C) in OSTrack's token order (row-major). Parts of the crop
-    outside the frame get zeros, like OSTrack's zero-padded crop."""
+    """Resample full-frame maps (B, G, G, C) to the search crops -> (B, out*out, C), zeros outside the frame."""
     b = fmap.shape[0]
-    cells = (torch.arange(out, device=fmap.device, dtype=torch.float32) + 0.5) / out          # cell centres, 0..1
-    px = crops[:, 0:1] + cells[None] * crops[:, 2:3]                                          # (B, out) pixels
+    cells = (torch.arange(out, device=fmap.device, dtype=torch.float32) + 0.5) / out
+    px = crops[:, 0:1] + cells[None] * crops[:, 2:3]
     py = crops[:, 1:2] + cells[None] * crops[:, 2:3]
-    gx = 2 * px / frame_wh[:, 0:1] - 1                                                        # -> [-1, 1]
+    gx = 2 * px / frame_wh[:, 0:1] - 1
     gy = 2 * py / frame_wh[:, 1:2] - 1
-    grid = torch.stack(torch.broadcast_tensors(gx[:, None, :], gy[:, :, None]), dim=-1)        # (B, out, out, 2)
+    grid = torch.stack(torch.broadcast_tensors(gx[:, None, :], gy[:, :, None]), dim=-1)
     sampled = F.grid_sample(fmap.permute(0, 3, 1, 2).float(), grid.float(), mode="bilinear",
-                            padding_mode="zeros", align_corners=False)                        # (B, C, out, out)
+                            padding_mode="zeros", align_corners=False)
     return sampled.flatten(2).transpose(1, 2).reshape(b, out * out, -1)
 
 
 class FusionV1(nn.Module):
+    """x + MLP([x; proj(v)]), last layer zero-initialised so it starts as plain OSTrack."""
+
     def __init__(self, dim: int = 768, vjepa_dim: int = 1024, hidden: int = 768):
         super().__init__()
         self.proj = nn.Sequential(nn.LayerNorm(vjepa_dim), nn.Linear(vjepa_dim, dim))
@@ -54,21 +42,15 @@ class FusionV1(nn.Module):
         nn.init.zeros_(self.mlp[-1].bias)
 
     def forward(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """x: (B, N, dim) OSTrack search tokens; v: (B, N, vjepa_dim) aligned V-JEPA tokens."""
         return x + self.mlp(torch.cat([x, self.proj(v)], dim=-1))
 
 
 HEAD_PARTS = {"none": (), "score": ("conv1_ctr", "conv2_ctr", "conv3_ctr", "conv4_ctr", "conv5_ctr"),
-              "all": ("",)}  # which layers of OSTrack's CenterPredictor may learn
+              "all": ("",)}
 
 
 class FusedOSTrack(nn.Module):
-    """Frozen OSTrack network + trainable fusion between backbone and box head.
-
-    train_head="score" / "all" also unfreezes the score branch / the whole box head (fine-tuned from
-    OSTrack's weights; BatchNorm statistics stay frozen). A frozen copy of the original head is kept as
-    `teacher`, and in training mode out["teacher_score_map"] is the original OSTrack's score map on
-    the unfused features (for a distillation loss that keeps the head from forgetting OSTrack)."""
+    """Frozen OSTrack + trainable fusion; optionally a fine-tuned head with a frozen teacher copy for distillation."""
 
     def __init__(self, ostrack_net: nn.Module, fusion: nn.Module, train_head: str = "none"):
         super().__init__()
@@ -82,11 +64,11 @@ class FusedOSTrack(nn.Module):
         if self.teacher is not None:
             for p in self.teacher.parameters():
                 p.requires_grad_(False)
-        self.n_search = self.net.feat_len_s  # 256
+        self.n_search = self.net.feat_len_s
 
     def train(self, mode: bool = True):
         super().train(mode)
-        self.net.eval()  # frozen part always in eval mode (no dropout / drop-path, frozen BatchNorm)
+        self.net.eval()  # keeps BatchNorm statistics frozen
         if self.teacher is not None:
             self.teacher.eval()
         return self
@@ -107,22 +89,12 @@ class FusedOSTrack(nn.Module):
         return out
 
 
-N_PRIOR = 4  # channels of prior_tokens
+N_PRIOR = 4
 
 
 def prior_tokens(fmap: torch.Tensor, m_first: torch.Tensor, m_recent: torch.Tensor, crops: torch.Tensor,
                  frame_wh: torch.Tensor) -> torch.Tensor:
-    """V-JEPA target-memory prior for OSTrack's head (fusion_v2a), resampled to the search grid.
-
-    fmap: (B, G, G, C) full-frame V-JEPA maps; m_first / m_recent: (B, C) target memory (pooled in the
-    first box / EMA over confident frames, as in src/tracker/relocalize.py); crops, frame_wh: as in
-    align_to_crop. Channels per search token:
-      0  cos(token, m_first)
-      1  cos(token, m_recent)
-      2  cos(token, m) - max over the whole frame of cos(token, m), m = both memories: 0 = the place
-         that looks most like the target anywhere in the frame, < 0 = something looks more like it
-      3  1 inside the frame, 0 in the zero-padded part of the crop
-    Returns (B, 256, 4). Only 4 numbers per token instead of 1024 features: little to overfit."""
+    """Per search token: cos to m_first, cos to m_recent, cos to both minus its frame maximum, inside-frame mask."""
     f = F.normalize(fmap.float(), dim=-1)
     mf, mr = F.normalize(m_first.float(), dim=-1), F.normalize(m_recent.float(), dim=-1)
     m = F.normalize(mf + mr, dim=-1)
@@ -135,12 +107,9 @@ def prior_tokens(fmap: torch.Tensor, m_first: torch.Tensor, m_recent: torch.Tens
 
 
 class PriorHead(nn.Module):
-    """OSTrack's CenterPredictor (frozen) + the V-JEPA prior in its score branch.
+    """OSTrack's CenterPredictor with the prior added to the score logits (A) and to conv1_ctr (AB).
 
-    mode "A":  score logits += conv3x3(prior)                       (37 parameters)
-    mode "AB": also conv1_ctr(x) += conv3x3(prior) before its BatchNorm, so the score branch can
-               combine the prior with what OSTrack sees               (+9.5k parameters)
-    All new layers start at zero, i.e. exactly OSTrack. Box size / offset branches are untouched."""
+    New layers are zero-initialised; the size and offset branches are unchanged."""
 
     def __init__(self, head: nn.Module, mode: str = "AB", k: int = N_PRIOR):
         super().__init__()
@@ -156,7 +125,6 @@ class PriorHead(nn.Module):
         return [p for n, p in self.named_parameters() if not n.startswith("head.")]
 
     def forward(self, x, prior, gt_score_map=None):
-        """x: (B, 768, 16, 16) search features; prior: (B, k, 16, 16)."""
         h = self.head
         c1 = h.conv1_ctr[0](x)
         if self.to_ctr1 is not None:
@@ -171,8 +139,7 @@ class PriorHead(nn.Module):
 
 
 class PriorOSTrack(nn.Module):
-    """Frozen OSTrack whose head also reads the V-JEPA memory prior (fusion_v2a). Only the new layers of
-    PriorHead learn."""
+    """Frozen OSTrack whose score branch also reads the V-JEPA memory prior; only PriorHead's new layers learn."""
 
     def __init__(self, ostrack_net: nn.Module, mode: str = "AB"):
         super().__init__()
@@ -181,7 +148,7 @@ class PriorOSTrack(nn.Module):
             p.requires_grad_(False)
         self.prior_head = PriorHead(self.net.box_head, mode)
         self.n_search = self.net.feat_len_s
-        self.box_head = self.net.box_head  # what OSTrack's tracker reads (feat_sz, cal_bbox)
+        self.box_head = self.net.box_head  # OSTrack's tracker calls box_head.cal_bbox
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -189,7 +156,6 @@ class PriorOSTrack(nn.Module):
         return self
 
     def forward(self, template, search, prior, ce_template_mask=None, ce_keep_rate=None):
-        """prior: (B, 256, k) from prior_tokens."""
         with torch.no_grad():
             feat, aux = self.net.backbone(z=template, x=search, ce_template_mask=ce_template_mask,
                                           ce_keep_rate=ce_keep_rate)
@@ -205,13 +171,12 @@ class PriorOSTrack(nn.Module):
 
 
 class VJEPACache:
-    """Cached maps of one video (scripts/cache_vjepa.py). `at(t)` returns the latest map computed
-    from frames <= t, so tracking stays causal."""
+    """Cached maps of one video; `at(t)` returns the latest map from frames <= t (causal)."""
 
     def __init__(self, path):
         d = np.load(path)
         self.frames, self.maps = d["frames"], d["maps"]
-        self.surprise = d["surprise"] if "surprise" in d.files else None  # (N, 16, 16), cache_vjepa.py --surprise
+        self.surprise = d["surprise"] if "surprise" in d.files else None
 
     def _index(self, t: int) -> int:
         return max(int(np.searchsorted(self.frames, t, side="right")) - 1, 0)

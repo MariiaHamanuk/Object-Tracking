@@ -1,13 +1,7 @@
-"""Download everything the LaSOT EDA needs without downloading the 230 GB of frames.
+"""Fetch LaSOT annotations, a few frames per video, split files and attributes (no full frames).
 
-For every class it reads the remote zip on HuggingFace with HTTP range requests and extracts only
-the annotation .txt files, a few evenly spaced frames per video and the frame count (n_images.txt).
-It also fetches the official split files and the per-sequence attribute labels (annos/att).
-
-    python scripts/fetch_lasot_annotations.py                     # all 70 classes -> $LASOT_ROOT or ./data
+    python scripts/fetch_lasot_annotations.py
     python scripts/fetch_lasot_annotations.py --classes person,cat --samples 4
-
-Re-running skips classes that are already done.
 """
 from __future__ import annotations
 
@@ -101,7 +95,7 @@ def main():
         for c, fut in futures.items():
             try:
                 print(fut.result(), flush=True)
-            except Exception as e:  # keep going; re-run to retry the failed ones
+            except Exception as e:
                 failed.append(c)
                 print(f"{c}: FAILED ({e})", flush=True)
 

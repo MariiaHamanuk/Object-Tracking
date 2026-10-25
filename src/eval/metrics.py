@@ -1,16 +1,11 @@
-"""Standard SOT metrics on LaSOT: Success (AUC), Precision, Normalized Precision.
-
-Mirrors baselines/OSTrack/lib/test/analysis/extract_results.py (pytracking protocol) so the numbers
-are directly comparable with published ones: frames where the target is absent count as failures,
-curves are averaged per sequence first, then over sequences.
-"""
+"""LaSOT metrics with the pytracking protocol (absent frames count as failures)."""
 from __future__ import annotations
 
 import numpy as np
 
-OVERLAP_THR = np.arange(0.0, 1.05, 0.05)       # 21 thresholds -> AUC
-CENTER_THR = np.arange(0, 51, dtype=float)      # pixels; Precision reported at 20 px
-CENTER_NORM_THR = np.arange(0, 51) / 100.0      # Normalized Precision reported at 0.20
+OVERLAP_THR = np.arange(0.0, 1.05, 0.05)
+CENTER_THR = np.arange(0, 51, dtype=float)      # Precision is reported at 20 px
+CENTER_NORM_THR = np.arange(0, 51) / 100.0      # Normalized Precision at 0.20
 
 
 def iou(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:

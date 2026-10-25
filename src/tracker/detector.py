@@ -1,16 +1,9 @@
-"""Open-vocabulary detector (YOLO-World, ultralytics) as an extra source of re-localization candidates.
-
-Only called on the frames where V-JEPA re-localization triggers, prompted with the video's LaSOT class
-name, so it proposes whole objects with real boxes instead of V-JEPA token centres with the last box
-size. Using the class name is extra information LaSOT provides (like its language annotation); OSTrack
-alone does not use it.
-"""
+"""YOLO-World detections of the video's LaSOT class, used as extra re-localization candidates."""
 from __future__ import annotations
 
 import cv2
 import numpy as np
 
-# LaSOT class -> a phrase YOLO-World's text encoder understands (the rest are used as they are)
 PROMPTS = {
     "rubicCube": "rubik's cube", "licenseplate": "license plate", "electricfan": "electric fan",
     "gametarget": "target", "sepia": "cuttlefish", "pool": "billiard ball", "yoyo": "yo-yo",
@@ -37,7 +30,7 @@ class YOLODetector:
             self.prompt = p
 
     def __call__(self, image_rgb: np.ndarray) -> np.ndarray:
-        """(N, 4) boxes x, y, w, h in pixels, most confident first."""
+        """(N, 4) boxes x, y, w, h, most confident first."""
         res = self.model.predict(cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR), conf=self.conf,
                                  max_det=self.max_det, verbose=False)[0]
         xyxy = res.boxes.xyxy.cpu().numpy() if len(res.boxes) else np.zeros((0, 4))

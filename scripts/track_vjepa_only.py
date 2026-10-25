@@ -1,12 +1,7 @@
-"""Track LaSOT videos with V-JEPA alone (src/tracker/vjepa_only.py), from the V-JEPA cache.
-
-Needs only the cache plus each video's groundtruth.txt and first frame (for the init box and the
-frame size), so it runs on CPU in minutes.
+"""Track with V-JEPA alone from the cache.
 
     python scripts/track_vjepa_only.py --sequences configs/splits/dev_occlusion.txt \\
         --vjepa-cache cache/vjepa --out results_raw/vjepa_only/lasot
-
-Writes <out>/<seq>.txt and <seq>_score.txt in the same format as scripts/run_ostrack_lasot.py.
 """
 from __future__ import annotations
 

@@ -1,17 +1,9 @@
-"""Cache V-JEPA 2 feature maps of full frames for LaSOT videos (computed once, reused by every experiment).
-
-For every `--every`-th frame t a causal clip (frames t-30, t-28, ..., t with the defaults) is encoded
-and the 16 x 16 x 1024 map of its last time step is stored. Frames are streamed from HuggingFace.
+"""Cache V-JEPA 2 maps (and with --surprise the predictor's surprise) every `--every` frames.
 
     python scripts/cache_vjepa.py --sequences configs/splits/dev_occlusion.txt
-    python scripts/cache_vjepa.py --sequences ... --shard 0 --num-shards 2   # one process per GPU
+    python scripts/cache_vjepa.py --sequences ... --surprise --shard 0 --num-shards 2
 
-With --surprise the V-JEPA predictor also predicts the last slot from the earlier ones and the
-per-token surprise 1 - cos(predicted, real) is stored (src/vjepa/predictor.py); ~2x slower.
-
-Output: <out>/<seq>.npz with `frames` (int, 0-based frame index t), `maps` (float16, N x 16 x 16 x C)
-and with --surprise `surprise` (float16, N x 16 x 16).
-Size: ~0.5 MB per map, i.e. ~180 MB per average dev video with --every 8.
+Output: <out>/<seq>.npz with frames, maps (N, 16, 16, C) and optionally surprise (N, 16, 16).
 """
 from __future__ import annotations
 
@@ -63,7 +55,7 @@ def main():
             continue
         paths = sorted((seq_dir / "img").glob("*.jpg"))
         ts = np.arange(0, len(paths), a.every)
-        cache: dict[int, np.ndarray] = {}  # consecutive clips share most frames
+        cache: dict[int, np.ndarray] = {}
 
         def frame(i):
             if i not in cache:
@@ -79,7 +71,7 @@ def main():
                 surprise.append(s.numpy())
             else:
                 maps.append(enc.encode_batch(clips).numpy())
-            keep = ts[b] - a.stride * a.clip_len  # frames older than the next clip can go
+            keep = ts[b] - a.stride * a.clip_len
             for i in [i for i in cache if i < keep]:
                 del cache[i]
         extra = dict(surprise=np.concatenate(surprise)) if a.surprise else {}

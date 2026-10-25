@@ -1,8 +1,4 @@
-"""Thin wrapper over the vendored OSTrack (baselines/OSTrack) that tracks one video at a time.
-
-Unlike OSTrack's own tracking/test.py it also returns a per-frame confidence (max of the raw score
-map), which the occlusion analysis and the V-JEPA fusion need.
-"""
+"""Wrapper over the vendored OSTrack that tracks one video and also returns per-frame confidence."""
 from __future__ import annotations
 
 import sys
@@ -18,7 +14,7 @@ DEFAULT_CONFIG = "vitb_256_mae_ce_32x4_ep300"
 
 
 def setup_ostrack(save_dir: Path):
-    """Put OSTrack on sys.path and write the local.py it insists on (paths are unused here)."""
+    """Put OSTrack on sys.path and write the local.py it requires."""
     if str(OSTRACK_DIR) not in sys.path:
         sys.path.insert(0, str(OSTRACK_DIR))
     local = OSTRACK_DIR / "lib" / "test" / "evaluation" / "local.py"
@@ -42,11 +38,11 @@ class OSTrackRunner:
         params.checkpoint = str(checkpoint)
         params.debug = 0
         self.tracker = OSTrack(params, "lasot")
-        self.vjepa = None  # (cache, frame_w, frame_h) while a fused video is tracked
+        self.vjepa = None
         self._record_scores()
 
     def _record_scores(self):
-        """Record the confidence of every forward pass without touching OSTrack's code."""
+        """Record the peak of the score map of every forward pass."""
         net, forward = self.tracker.network, self.tracker.network.forward
         self.last_score = np.nan
 
@@ -58,9 +54,7 @@ class OSTrackRunner:
         net.forward = forward_with_score
 
     def enable_fusion(self, fusion_weights: Path, head_weights: Path | None = None):
-        """Insert a trained FusionV1 between OSTrack's backbone and box head (src/tracker/fusion.py),
-        optionally with the fine-tuned box head (head.pth from train_fusion.py --train-head).
-        Call set_vjepa(cache, w, h) for every video before track()."""
+        """Use a trained FusionV1 (and optionally a fine-tuned head); call set_vjepa for every video."""
         import torch
         from src.tracker.fusion import FusedOSTrack, FusionV1
 
@@ -71,7 +65,7 @@ class OSTrackRunner:
         fused = FusedOSTrack(self.tracker.network, fusion).to(next(self.tracker.network.parameters()).device).eval()
         runner = self
 
-        class Network(torch.nn.Module):  # what OSTrack's tracker calls: forward(...) and .box_head
+        class Network(torch.nn.Module):  # OSTrack's tracker only uses forward(...) and .box_head
             def __init__(self):
                 super().__init__()
                 self.fused, self.box_head = fused, fused.net.box_head
@@ -83,9 +77,7 @@ class OSTrackRunner:
         self._record_scores()
 
     def enable_prior(self, prior_weights: Path):
-        """Use OSTrack's head with the V-JEPA memory prior (src/tracker/fusion.PriorOSTrack, prior.pth
-        from train_fusion.py --prior). Call set_vjepa(cache, w, h, memory) for every video before
-        track(); `memory` is a VJEPARelocalizer passed as the hook too, which keeps m_first / m_recent."""
+        """Use the prior head; call set_vjepa(cache, w, h, memory) with the relocalizer as memory."""
         import torch
         from src.tracker.fusion import PriorOSTrack
 
@@ -112,8 +104,6 @@ class OSTrackRunner:
         self.memory = memory
 
     def _prior(self, device):
-        """V-JEPA memory prior (fusion.prior_tokens) for the search region OSTrack is about to cut,
-        from the memory as it was after the previous frame (causal)."""
         import torch
         from src.tracker.fusion import prior_tokens, search_crop
 
@@ -125,7 +115,6 @@ class OSTrackRunner:
                             crop, torch.tensor([[w, h]], dtype=torch.float32, device=device))
 
     def _vjepa_tokens(self, device):
-        """V-JEPA map of the current frame resampled to the search region OSTrack is about to cut."""
         import torch
         from src.tracker.fusion import align_to_crop, search_crop
 
@@ -136,23 +125,17 @@ class OSTrackRunner:
         return align_to_crop(fmap, crop, torch.tensor([[w, h]], dtype=torch.float32, device=device))
 
     def track(self, frames: list[Path], init_box, hook=None, verify: bool = False, verify_min: float = 0.0) -> dict:
-        """frames: image paths in order; init_box: (x, y, w, h) on frames[0].
-        hook(i, box, score) -> None, one box or a list of candidate boxes, called after every frame.
-          verify=False: the (first) returned box replaces the tracker state, so the search region of
-                        frame i+1 is cut around it.
-          verify=True:  OSTrack re-runs on the SAME frame with its search region around every
-                        candidate; the best candidate is kept only if its score beats the current one,
-                        and then also replaces this frame's output box. With verify_min > 0 the
-                        winner's score must also reach verify_min (a confident detection, not just
-                        a less bad one than the lost box).
-        Returns boxes (N, 4), scores (N,) with NaN for the init frame, per-frame seconds, the frames
-        where the search region moved, and `checks` (one row per verified candidate set)."""
+        """Track `frames` from `init_box`.
+
+        hook(i, box, score[, image]) may return candidate boxes. Without `verify` the first one becomes
+        the new state; with `verify` OSTrack re-runs around each candidate on the same frame and keeps
+        the best only if its score beats the current one and reaches `verify_min`."""
         n = len(frames)
         boxes, scores, times = np.zeros((n, 4)), np.full(n, np.nan), np.zeros(n)
         moved, checks = [], []
         for i, f in enumerate(frames):
             image = cv2.cvtColor(cv2.imread(str(f)), cv2.COLOR_BGR2RGB)
-            self._frame = i  # V-JEPA fusion reads the map of the current frame (causal cache lookup)
+            self._frame = i
             t = time.perf_counter()
             if i == 0:
                 self.tracker.initialize(image, {"init_bbox": list(map(float, init_box))})
@@ -162,7 +145,7 @@ class OSTrackRunner:
                 scores[i] = self.last_score
             if hook is None:
                 cands = None
-            elif getattr(hook, "needs_image", False):  # e.g. re-localization with a detector
+            elif getattr(hook, "needs_image", False):
                 cands = hook(i, boxes[i], scores[i], image)
             else:
                 cands = hook(i, boxes[i], scores[i])
@@ -182,9 +165,7 @@ class OSTrackRunner:
         return dict(boxes=boxes, scores=scores, times=times, moved=np.array(moved, dtype=int), checks=checks)
 
     def _verify(self, image, candidates, box, score, min_score: float = 0.0):
-        """Run OSTrack around every candidate on the same frame; keep the best one only if OSTrack is
-        more confident there than at its current box (and at least min_score). Leaves the tracker
-        state on the winner. Returns (box or None, score, index of the winning candidate or -1)."""
+        """Returns (best box or None, its score, its index or -1); leaves the tracker state on the winner."""
         best_box, best_score, best_idx = None, float(score), -1
         for k, c in enumerate(candidates):
             self.tracker.state = [float(v) for v in c]

@@ -1,12 +1,6 @@
-"""V-JEPA 2 predictor (the "world model" part): predict the features of hidden tokens from visible ones.
+"""V-JEPA 2 predictor: predict hidden tokens of a clip from the visible ones.
 
-HF's VJEPA2Model.forward runs the encoder on the WHOLE clip and only then drops the target tokens, so
-hidden content leaks into the context through attention. As in V-JEPA training, `predict` runs the
-encoder on the context tokens only (RoPE positions come from their indices) and the predictor then
-fills in the targets.
-
-Token index = slot * 256 + row * 16 + col, slot = time step of 2 frames (tubelet), 8 slots per
-16-frame clip.
+Token index = slot * 256 + row * 16 + col; a slot is 2 frames, a 16-frame clip has 8 slots.
 """
 from __future__ import annotations
 
@@ -19,15 +13,15 @@ from src.vjepa.encoder import VJEPAEncoder, box_to_grid
 class VJEPAPredictor(VJEPAEncoder):
     @torch.no_grad()
     def encode_tokens(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (1, T, 3, 256, 256) preprocessed clip -> (N, C) encoder tokens of the full clip."""
         return self.model.get_vision_features(pixel_values_videos=x.to(self.device, self.dtype))[0].float().cpu()
 
     @torch.no_grad()
     def predict(self, x: torch.Tensor, ctx: np.ndarray, tgt: np.ndarray) -> torch.Tensor:
-        """Encode only the `ctx` tokens of clip(s) x (B, T, 3, H, W), predict the `tgt` tokens
-        -> (len(tgt), C) for one clip, (B, len(tgt), C) for several. Same ctx / tgt for every clip."""
+        """Predict `tgt` tokens of clip(s) x from the `ctx` tokens -> (len(tgt), C) or (B, len(tgt), C)."""
+        # HF's forward encodes the whole clip and drops targets afterwards, which leaks them through
+        # attention; as in V-JEPA training only the context tokens go through the encoder here
         enc, dev = self.model.encoder, self.device
-        h = enc.embeddings(x.to(dev, self.dtype))                                     # (B, N, C)
+        h = enc.embeddings(x.to(dev, self.dtype))
         b = h.shape[0]
         ci = torch.as_tensor(np.sort(ctx), device=dev)[None].expand(b, -1)
         ti = torch.as_tensor(np.sort(tgt), device=dev)[None].expand(b, -1)
@@ -35,34 +29,27 @@ class VJEPAPredictor(VJEPAEncoder):
         for layer in enc.layer:
             hc = layer(hc, ci)[0]
         hc = enc.layernorm(hc)
-        full = h.new_zeros(h.shape).scatter(1, ci[..., None].expand_as(hc), hc)       # predictor gathers ctx itself
+        full = h.new_zeros(h.shape).scatter(1, ci[..., None].expand_as(hc), hc)  # predictor gathers ctx itself
         out = self.model.predictor(encoder_hidden_states=full, context_mask=[ci], target_mask=[ti])
         out = out.last_hidden_state.float().cpu()
         return out[0] if b == 1 else out
 
     @torch.no_grad()
     def encode_with_surprise(self, clips: list[list[np.ndarray]]) -> tuple[torch.Tensor, torch.Tensor]:
-        """For each clip: the map of its last time slot (like encode_batch) and the predictor's
-        surprise there: the last slot ("now") is predicted from the earlier slots only, and
-        surprise = 1 - cos(predicted, real) per token. High where the scene changed in a way the
-        model did not expect, e.g. where the target just disappeared behind something.
-        Returns (B, 16, 16, C) fp16 and (B, 16, 16) fp16 on CPU."""
+        """Map of the last slot and surprise = 1 - cos(predicted, real) when it is predicted from the earlier slots."""
         x = torch.cat([self.preprocess(c) for c in clips])
         g, slots = self.grid, len(clips[0]) // self.tubelet
         real = self.model.get_vision_features(pixel_values_videos=x.to(self.device, self.dtype))
-        real = real.float().view(len(clips), slots, g * g, -1)[:, -1].cpu()          # (B, 256, C)
+        real = real.float().view(len(clips), slots, g * g, -1)[:, -1].cpu()
         last = self.slot_tokens(slots - 1)
         pred = self.predict(x, np.arange(last[0]), last)
         pred = pred if pred.dim() == 3 else pred[None]
-        surprise = 1 - torch.nn.functional.cosine_similarity(pred, real, dim=-1)       # (B, 256)
+        surprise = 1 - torch.nn.functional.cosine_similarity(pred, real, dim=-1)
         return real.view(len(clips), g, g, -1).half(), surprise.view(len(clips), g, g).half()
 
     @torch.no_grad()
     def target_surprise(self, x: torch.Tensor, box, frame_w: int, frame_h: int, real_last: torch.Tensor) -> float:
-        """Hide only the target's box in the last slot of clip x and predict it from everything else
-        (the earlier slots AND the current surroundings, so camera motion is explained by the context).
-        real_last: (G, G, C) encoder map of that slot (the cached map). -> 1 - cos(predicted, real),
-        both pooled over the hidden tokens."""
+        """Surprise when only the box in the last slot is hidden and predicted from everything else."""
         g, slots = self.grid, x.shape[1] // self.tubelet
         hide = self.box_tokens(box, frame_w, frame_h, slots - 1)
         pred = self.predict(x, np.setdiff1d(np.arange(slots * g * g), hide), hide).mean(0)
@@ -71,8 +58,7 @@ class VJEPAPredictor(VJEPAEncoder):
 
     @torch.no_grad()
     def future_map(self, x: torch.Tensor, ahead: int = 2) -> torch.Tensor:
-        """Predict the slot `ahead` steps after the end of clip x (2 frames per slot) from the whole clip:
-        (G, G, C) - where the scene, and the target in it, is expected to be."""
+        """Predicted (G, G, C) map `ahead` slots after the end of the clip."""
         g, slots = self.grid, x.shape[1] // self.tubelet
         future = self.slot_tokens(slots - 1 + ahead)
         return self.predict(x, np.arange(slots * g * g), future).view(g, g, -1)
@@ -82,7 +68,6 @@ class VJEPAPredictor(VJEPAEncoder):
         return slot * g * g + np.arange(g * g)
 
     def box_tokens(self, box, frame_w: int, frame_h: int, slot: int) -> np.ndarray:
-        """Token indices of `slot` touched by a pixel box (at least one token)."""
         g = self.grid
         x0, y0, x1, y1 = box_to_grid(box, frame_w, frame_h, g)
         c0, r0 = int(np.clip(np.floor(x0), 0, g - 1)), int(np.clip(np.floor(y0), 0, g - 1))

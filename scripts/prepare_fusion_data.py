@@ -1,24 +1,7 @@
-"""Build training samples for the V-JEPA fusion (docs/vjepa_integration.md, "Навчання").
+"""Training samples for the fusion: occlusion, absent and normal crops with V-JEPA maps and memory.
 
-Per training video (configs/splits/train_fusion.txt) three kinds of samples:
-  occlusion - (kind 1) the first frames after the target comes back; the search region is cut around
-              the box where it VANISHED, i.e. where a real tracker would still be looking
-  absent    - (kind 2) a frame INSIDE the absence episode, same crop: the target is not there, so a
-              retrained score head should learn to give a low peak (search_box = 0, in_crop = 0)
-  normal    - (kind 0) a visible frame with OSTrack's own training jitter (centre 3, scale 0.25),
-              as many as occlusion samples
-The template is a visible frame up to 100 frames earlier. Each sample stores the template / search
-crops exactly as OSTrack cuts them, the target box inside the search crop, the crop geometry and the
-FULL-frame V-JEPA map of the causal clip ending at the search frame (the crop part is resampled at
-training time; the full map is kept for fusion_v2) and the target memory for the prior head
-(fusion.prior_tokens): `mem_first` = V-JEPA features pooled in the GT box of frame 0, `mem_recent` =
-pooled in the template box on the template frame (stands in for the tracker's EMA over confident frames).
-
-    python scripts/prepare_fusion_data.py --max-videos 2 --per-video 4     # quick CPU check
-    python scripts/prepare_fusion_data.py --shard 0 --num-shards 2          # Kaggle, one per GPU
-    python scripts/prepare_fusion_data.py --static ...                      # control: repeated frame
-
-Output: <out>/<seq>.npz per video. ~0.75 MB per sample.
+    python scripts/prepare_fusion_data.py --max-videos 2 --per-video 4
+    python scripts/prepare_fusion_data.py --shard 0 --num-shards 2
 """
 from __future__ import annotations
 
@@ -44,9 +27,9 @@ from src.vjepa.encoder import DEFAULT_MODEL, VJEPAEncoder, clip_indices, pool_bo
 
 TEMPLATE_FACTOR, TEMPLATE_SIZE = 2.0, 128
 SEARCH_FACTOR, SEARCH_SIZE = 4.0, 256
-CENTER_JITTER, SCALE_JITTER = 3.0, 0.25   # OSTrack's search jitter (experiments/ostrack/*.yaml)
+CENTER_JITTER, SCALE_JITTER = 3.0, 0.25   # OSTrack's search jitter
 MAX_TEMPLATE_GAP = 100
-OCC_OFFSET = 10                           # search frame = 0..9 frames after the target is back
+OCC_OFFSET = 10
 
 
 def plan_samples(s, n_per_kind: int, rng: np.random.Generator) -> list[dict]:
@@ -58,18 +41,17 @@ def plan_samples(s, n_per_kind: int, rng: np.random.Generator) -> list[dict]:
         cand = np.flatnonzero(ok[max(0, t - MAX_TEMPLATE_GAP):t]) + max(0, t - MAX_TEMPLATE_GAP)
         return int(rng.choice(cand)) if len(cand) else None
 
-    # occlusion samples: one per returning episode, longest episodes first
+    # occlusion: search crop around the box where the target vanished, frames after it returns
     starts, lengths = runs(s.absent)
     eps = [(a, l) for a, l in zip(starts, lengths) if a > 0 and a + l < s.n_frames and ok[a - 1]]
     for a, l in sorted(eps, key=lambda e: -e[1])[:n_per_kind]:
         back = a + l
         cand = [t for t in range(back, min(back + OCC_OFFSET, s.n_frames)) if ok[t]]
-        tmpl = template_for(a)  # frames before the episode, up to the last one where it was seen
+        tmpl = template_for(a)
         if cand and tmpl is not None:
             plans.append(dict(kind=1, t=int(rng.choice(cand)), template_t=tmpl, centre=s.boxes[a - 1].copy()))
             plans.append(dict(kind=2, t=int(rng.integers(a, back)), template_t=tmpl, centre=s.boxes[a - 1].copy()))
 
-    # normal samples: as many as occlusion samples (at least a few for videos without occlusion)
     n_norm = max(sum(p["kind"] == 1 for p in plans), min(n_per_kind, 4))
     cand = np.flatnonzero(ok[1:]) + 1
     for t in rng.choice(cand, size=min(n_norm, len(cand)), replace=False) if len(cand) else []:
@@ -126,9 +108,9 @@ def main():
         try:
             if cls not in zips:
                 zips = {cls: open_class_zip(cls)}
-            seq_dir = extract_frames(zips[cls], seq, [], work)       # annotations only
+            seq_dir = extract_frames(zips[cls], seq, [], work)
             s = load_sequence(seq_dir, read_image_size=False)
-            rng = np.random.default_rng(zlib.crc32(seq.encode()))  # same samples on every run
+            rng = np.random.default_rng(zlib.crc32(seq.encode()))
             plans = plan_samples(s, a.per_video, rng)
             if not plans:
                 print(f"[{k}/{len(todo)}] {seq}: no samples", flush=True)
@@ -139,7 +121,7 @@ def main():
                                                                     for pl in plans]
             need = np.unique(np.r_[np.concatenate(clips + mem_clips), [pl["template_t"] for pl in plans]])
             extract_frames(zips[cls], seq, need, work)
-        except Exception as e:  # network trouble: skip, a re-run retries the video
+        except Exception as e:
             print(f"[{k}/{len(todo)}] {seq}: FAILED ({e})", flush=True)
             continue
 
@@ -156,7 +138,7 @@ def main():
             tc, tb = crop_with_box(img(pl["template_t"]), s.boxes[pl["template_t"]], s.boxes[pl["template_t"]],
                                    TEMPLATE_FACTOR, TEMPLATE_SIZE)
             sc, sb = crop_with_box(img(pl["t"]), pl["centre"], s.boxes[pl["t"]], SEARCH_FACTOR, SEARCH_SIZE)
-            if pl["kind"] == 2:  # target hidden: no box (LaSOT often keeps a stale one on absent frames)
+            if pl["kind"] == 2:  # LaSOT often keeps a stale box on absent frames
                 sb = np.zeros(4, dtype=np.float32)
             cx, cy = (sb[0] + sb[2] / 2, sb[1] + sb[3] / 2) if pl["kind"] != 2 else (-1.0, -1.0)
             rec["template"].append(tc)

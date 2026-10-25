@@ -1,27 +1,9 @@
-"""Does the V-JEPA 2 predictor (world model) help tracking? Two probes, no training, no OSTrack.
+"""Two probes of the V-JEPA predictor, without OSTrack.
 
-Every `--every`-th frame t of each dev video, causal clip ending at t (16 frames, stride 2 -> 8 time
-slots of 2 frames; the last slot = "now"). m = target memory pooled in the GT box of frame 0.
+A: surprise at the target's last visible box as an occlusion detector (AUROC).
+B: is the target found on the predicted future slot (vs. the real and the last seen slot).
 
-A. Surprise = occlusion detector.
-   Hide the tokens of the last slot inside the last box where the target was visible (what a tracker
-   that froze there would watch), predict them from the rest of the clip, compare with what the
-   encoder actually sees there:
-     surprise    = 1 - cos(predicted, real)          (pooled over the hidden tokens)
-     mem_drop    = 1 - cos(real, m)                  (encoder-only baseline)
-     mem_drop_pred = 1 - cos(predicted, m)
-   If the target was there a moment ago and now is hidden, the predictor should "expect" it while the
-   encoder sees the occluder -> surprise up. Scored by AUROC of separating absent (full occlusion or
-   out of view at t) from visible frames.
-
-B. Future prediction = where will the target be.
-   Context = the first `--context-slots` slots only, predict all tokens of the remaining slots, and
-   search m on the predicted last slot. Compared with the real last slot (upper bound) and the last
-   context slot (no prediction, "the scene as last seen"):
-     hit = most similar token lies in the GT box at t; also the GT percentile (50 = chance).
-   Only frames with the target visible at t.
-
-    python scripts/vjepa_predictor_check.py --sequences configs/splits/dev_occlusion.txt --out results/vjepa_predictor_check
+    python scripts/vjepa_predictor_check.py --sequences configs/splits/dev_occlusion.txt
 """
 from __future__ import annotations
 
@@ -68,7 +50,7 @@ def auroc(score: np.ndarray, label: np.ndarray) -> float:
 
 def summarize(df: pd.DataFrame) -> dict:
     out = {"n_frames": len(df), "n_videos": int(df.seq.nunique()), "n_absent": int(df.absent.sum())}
-    a = df[df.target_seen_recently]  # A only makes sense right after the target was visible
+    a = df[df.target_seen_recently]
     lab = a.absent.to_numpy(bool)
     out["A_occlusion_auroc"] = {k: auroc(a[k].to_numpy(), lab) for k in ("surprise", "mem_drop", "mem_drop_pred")}
     out["A_n"] = {"frames": len(a), "absent": int(lab.sum())}
@@ -114,7 +96,7 @@ def main():
             return frames[i]
 
         h, w = frame(0).shape[:2]
-        g, last = enc.grid, 8 - 1                                  # 16 frames / tubelet 2 = 8 slots
+        g, last = enc.grid, 8 - 1
         last_tok = enc.slot_tokens(last)
         valid = s.valid_box
         first = enc.encode_tokens(enc.preprocess([frame(i) for i in clip_indices(0)]))[last_tok]
@@ -125,9 +107,9 @@ def main():
         rows = []
         for t in range(a.every, len(paths), a.every):
             x = enc.preprocess([frame(i) for i in clip_indices(t)])
-            real = enc.encode_tokens(x)                                                     # (2048, C)
+            real = enc.encode_tokens(x)
             seen = np.nonzero(valid[: t + 1])[0]
-            ref = int(seen[-1]) if len(seen) else 0                                         # last visible frame
+            ref = int(seen[-1]) if len(seen) else 0
             hide = enc.box_tokens(s.boxes[ref], w, h, last)
             pred_a = enc.predict(x, np.setdiff1d(np.arange(8 * g * g), hide), hide).mean(0)
             real_a = real[hide].mean(0)
@@ -136,7 +118,7 @@ def main():
                        surprise=1 - cos(pred_a, real_a), mem_drop=1 - cos(real_a, m), mem_drop_pred=1 - cos(pred_a, m))
             if valid[t]:
                 gt_idx = enc.box_tokens(s.boxes[t], w, h, 0)
-                pred_b = enc.predict(x, ctx_b, tgt_b)[-g * g:]                              # predicted last slot
+                pred_b = enc.predict(x, ctx_b, tgt_b)[-g * g:]
                 for name, tok in (("real", real[last_tok]), ("predicted", pred_b),
                                   ("last_seen", real[enc.slot_tokens(a.context_slots - 1)])):
                     row[f"hit_{name}"], row[f"pct_{name}"] = search(m, tok, gt_idx)

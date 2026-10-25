@@ -1,17 +1,8 @@
-"""Occlusion-specific evaluation: occlusion recovery rate and quality around absence episodes.
+"""Occlusion recovery around absence episodes.
 
-An *episode* is a maximal run of frames where the target is absent (full occlusion and/or out of
-view). After the target reappears we look at a recovery window of `window` frames (cut short by the
-next absence or the end of the video):
-
-* recovered        - the tracker overlaps the target (IoU > iou_thr) in some frame of the window
-* frames_to_recover - how many frames after reappearance that first happens
-* locked_before    - the tracker was on target (IoU > iou_thr) in at least one of the last
-                     `lock_window` annotated frames before the episode; recovery is only meaningful
-                     for these, so the headline ORR is computed on them. A window rather than the
-                     last frame because the GT box shrinks as the target disappears (median area
-                     0.36x of 30 frames earlier on the test set), so the last-frame IoU is often low
-                     even when the tracker is on target.
+recovered: IoU > iou_thr in the `window` frames after the target returns.
+locked_before: IoU > iou_thr in one of the last `lock_window` visible frames before the episode
+(a window, because the GT box shrinks as the target disappears). ORR uses these episodes, ORR_all all.
 """
 from __future__ import annotations
 
@@ -33,7 +24,7 @@ def episodes(seq_name: str, iou: np.ndarray, full_occ: np.ndarray, out_view: np.
     for k, (a, l) in enumerate(zip(starts, lengths)):
         before, back = a - 1, a + l
         if before < 0 or back >= n:
-            continue  # starts at frame 0 or never comes back: nothing to recover
+            continue  # nothing to recover from
         stop = starts[k + 1] if k + 1 < len(starts) else n
         win = np.arange(back, min(back + window, stop))
         win = win[gt_valid[win]]

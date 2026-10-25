@@ -1,8 +1,4 @@
-"""V-JEPA 2 predictor run during tracking (needs the tracker's box, so it cannot be cached).
-
-Keeps the frames the causal clips need (even frames of the last 31, already resized to 256 x 256) and,
-at a check frame t, builds the same clip as scripts/cache_vjepa.py (t-30, t-28, ..., t).
-"""
+"""V-JEPA 2 predictor run during tracking, on the same causal clips as scripts/cache_vjepa.py."""
 from __future__ import annotations
 
 import numpy as np
@@ -22,16 +18,15 @@ class OnlinePredictor:
         self.frames = {}
 
     def push(self, i: int, image_rgb: np.ndarray):
-        """Call for every frame (only every `stride`-th is kept)."""
         if i % self.stride:
             return
-        self.frames[i] = self.pred.preprocess([image_rgb])[0, 0].half()     # (3, 256, 256)
+        self.frames[i] = self.pred.preprocess([image_rgb])[0, 0].half()
         for k in [k for k in self.frames if k < i - self.stride * self.clip_len]:
             del self.frames[k]
 
     def clip(self, t: int) -> torch.Tensor:
         idx = clip_indices(t, self.clip_len, self.stride)
-        return torch.stack([self.frames[int(k)] for k in idx])[None].float()  # (1, T, 3, 256, 256)
+        return torch.stack([self.frames[int(k)] for k in idx])[None].float()
 
     def target_surprise(self, t: int, box, frame_w: int, frame_h: int, real_last) -> float:
         return self.pred.target_surprise(self.clip(t), box, frame_w, frame_h, torch.as_tensor(real_last))

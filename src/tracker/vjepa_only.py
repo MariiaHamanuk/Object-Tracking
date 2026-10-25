@@ -1,17 +1,5 @@
-"""Tracking with V-JEPA alone (no OSTrack, nothing trained) - a sanity check of how much the frozen
-features know about *where* the target is, not a competitive tracker.
-
-Same target memory as the re-localizer (src/tracker/relocalize.py):
-  m = normalize(m_first) + normalize(m_recent), m_recent = EMA over confident frames.
-At every cached frame (every 8th):
-  sim    = cosine(m, every token), upsampled 16x16 -> 64x64 for sub-token positions
-  prior  = Gaussian around the last centre (sigma = `motion` box sizes), so a far look-alike only wins
-           if it is clearly more similar; sim * prior picks the peak
-  box    = bounding box of the connected region around the peak where sim >= peak - half of
-           (peak - median); its size is smoothed with the last size (EMA `size_ema`)
-  confident = peak >= `confident_ratio` x running mean of peaks -> update m_recent and the centre prior
-Between cached frames the last box is held (causal: the next map is not known yet).
-"""
+"""Tracking with V-JEPA alone: memory matching on the cached maps, a centre prior and a box from the
+similarity blob around the peak. A control, not a competitive tracker."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,10 +15,10 @@ from src.vjepa.encoder import pool_box
 
 @dataclass
 class VJEPAOnlyParams:
-    up: int = 64                 # upsampled similarity grid
-    motion: float = 1.5          # sigma of the centre prior, in box sizes (relative to the frame grid)
-    size_ema: float = 0.3        # weight of the new size estimate
-    ema: float = 0.1             # memory update rate
+    up: int = 64
+    motion: float = 1.5
+    size_ema: float = 0.3
+    ema: float = 0.1
     confident_ratio: float = 0.9
 
 
@@ -47,14 +35,12 @@ class VJEPAOnlyTracker:
         return torch.from_numpy(self.cache.at(t).astype(np.float32))
 
     def step(self, t: int) -> np.ndarray:
-        """(box, peak similarity) for the cached frame t."""
         p, u = self.p, self.p.up
         fmap = self._map(t)
         m = F.normalize(self.m_first + self.m_recent, dim=0)
         sim = F.cosine_similarity(fmap, m[None, None], dim=-1)
         sim = F.interpolate(sim[None, None], size=(u, u), mode="bilinear", align_corners=False)[0, 0].numpy()
 
-        # centre prior in upsampled-grid units (the frame is squashed to a square grid)
         x, y, bw, bh = self.box
         cx, cy = (x + bw / 2) / self.w * u, (y + bh / 2) / self.h * u
         size = np.sqrt((bw / self.w) * (bh / self.h)) * u
@@ -63,7 +49,6 @@ class VJEPAOnlyTracker:
         r, c = np.unravel_index(np.argmax((sim - sim.min()) * prior), sim.shape)
         peak = float(sim[r, c])
 
-        # extent: connected region around the peak above half-way between median and peak
         labels, _ = ndimage.label(sim >= peak - 0.5 * (peak - np.median(sim)))
         rows, cols = np.nonzero(labels == labels[r, c])
         nw = (cols.max() - cols.min() + 1) / u * self.w
@@ -79,7 +64,6 @@ class VJEPAOnlyTracker:
         return self.box, peak
 
     def track(self, n_frames: int):
-        """Boxes (n, 4) and scores (n,) for all frames; uncached frames hold the last box."""
         boxes, scores = np.zeros((n_frames, 4)), np.full(n_frames, np.nan)
         boxes[0] = self.box
         cached = set(int(t) for t in self.cache.frames)

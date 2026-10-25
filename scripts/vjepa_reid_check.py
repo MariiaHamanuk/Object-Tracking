@@ -1,18 +1,7 @@
-"""Pre-check before training any fusion: can V-JEPA 2 features re-find the target after an occlusion?
+"""Can V-JEPA features re-find the target after an occlusion? Memory from before the episode is
+matched against the map of the first frame after it, with a real clip and with a repeated frame.
 
-For every absence episode (default: dev subset, tracker on target before, length >= 6 frames):
-  m      = V-JEPA features pooled inside the GT box on the last frame before the target vanished
-  F_after = V-JEPA map of the first frame where it is visible again
-  sim    = cosine(m, every token of F_after)  -> 16 x 16 map over the whole frame
-and we ask
-  top1_hit      - does the most similar token overlap the GT box?         (chance = share of tokens it covers)
-  gt_percentile - how many tokens are less similar than the GT location?   (chance = 50 %)
-  beats_ostrack - when OSTrack is off target, is GT more similar than where OSTrack went?
-Each episode is run twice: with a real causal clip (motion) and with the last frame repeated
-(no motion). If both score the same, the benefit would come from appearance, not from the video model.
-
-    python scripts/vjepa_reid_check.py                    # dev subset, official OSTrack results
-    python scripts/vjepa_reid_check.py --max-episodes 20  # quick run (CPU: ~1 min per episode)
+    python scripts/vjepa_reid_check.py --max-episodes 20
 """
 from __future__ import annotations
 
@@ -91,7 +80,7 @@ def main():
         need = np.r_[clip_indices(before, a.clip_len, a.stride), clip_indices(after, a.clip_len, a.stride)]
         if cls not in zips:
             zips = {cls: open_class_zip(cls)}
-        seq_dir = extract_frames(zips[cls], e.seq, need, a.work)  # also writes the annotation files
+        seq_dir = extract_frames(zips[cls], e.seq, need, a.work)
         s = load_sequence(seq_dir, read_image_size=False)
         h, w = load_rgb(seq_dir, before).shape[:2]
         trk = np.loadtxt(a.tracker / f"{e.seq}.txt", delimiter="\t", ndmin=2)
@@ -107,7 +96,7 @@ def main():
             for key, v in score(m, enc.encode(clip(after)), gt_after, trk_after, w, h).items():
                 row[f"{mode}_{key}"] = v
         rows.append(row)
-        pd.DataFrame(rows).to_csv(done_file, index=False)  # resumable
+        pd.DataFrame(rows).to_csv(done_file, index=False)
         el = time.time() - t0
         print(f"[{k + 1}/{len(ep)}] {e.seq} len={e.length}: motion top1={row['motion_top1_hit']} "
               f"pct={row['motion_gt_percentile']:.0f} | static top1={row['static_top1_hit']} "

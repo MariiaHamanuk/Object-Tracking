@@ -1,14 +1,6 @@
-"""Fit the "learned" occlusion warning (src/tracker/relocalize.py, warning="learned") on TRAIN videos.
-
-Input: the <seq>_reloc.csv logs of a run on configs/splits/warning_train.txt (every check's causal
-features: ranks of the score drop / predictor surprise / ..., V-JEPA similarities) and the LaSOT
-annotations. Label of a check at frame t: the target is hidden at some frame in [t, t + horizon].
-A logistic regression is fitted per feature set and scored by leave-one-video-out AUROC, so the
-predictor's contribution is measured on train, not on the dev videos we report.
+"""Fit the learned occlusion warning on train-video logs (leave-one-video-out AUROC per feature set).
 
     python scripts/fit_warning.py --logs results_raw/warning_train/lasot --out configs/warning_weights.json
-
-Writes the weights of the best feature set that uses the predictor, and a table of all sets.
 """
 from __future__ import annotations
 
@@ -71,7 +63,7 @@ def main():
             continue
         X, y = d[feats].to_numpy(float), d.y.to_numpy(bool)
         out = np.zeros(len(d))
-        for seq in d.seq.unique():  # leave one video out
+        for seq in d.seq.unique():
             m = (d.seq == seq).to_numpy()
             out[m] = LogisticRegression(max_iter=1000).fit(X[~m], y[~m]).decision_function(X[m])
         clf = LogisticRegression(max_iter=1000).fit(X, y)

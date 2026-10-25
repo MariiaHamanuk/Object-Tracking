@@ -1,17 +1,10 @@
-"""Run OSTrack on the LaSOT test set, streaming each video's frames from HuggingFace.
-
-Only one or two videos are on disk at a time (the next one downloads while the current one is
-tracked), so this runs on Kaggle / Colab without the 230 GB dataset. Finished videos are skipped,
-so an interrupted run can simply be restarted.
+"""Run OSTrack (optionally with V-JEPA) on LaSOT videos streamed from HuggingFace.
 
     python scripts/run_ostrack_lasot.py --checkpoint OSTrack_ep0300.pth.tar
-    python scripts/run_ostrack_lasot.py --checkpoint ... --shard 0 --num-shards 2   # one process per GPU
-    python scripts/run_ostrack_lasot.py --checkpoint ... --sequences airplane-1 --max-frames 50  # smoke test
     python scripts/run_ostrack_lasot.py --checkpoint ... --sequences configs/splits/dev_occlusion.txt \\
-        --vjepa-cache cache/vjepa --out results_raw/ostrack_vjepa_reloc   # + V-JEPA re-localization
+        --vjepa-cache cache/vjepa --reloc-verify 3 --verify-min 0.6
 
-Writes <out>/<seq>.txt (x y w h per frame), <seq>_score.txt (confidence) and <seq>_time.txt;
-with --vjepa-cache also <seq>_reloc.csv (every V-JEPA check and whether the search region moved).
+Writes <out>/<seq>.txt, _score.txt, _time.txt and with V-JEPA _reloc.csv / _verify.csv.
 """
 from __future__ import annotations
 
@@ -145,7 +138,7 @@ def main():
             h, w = cv2.imread(str(frames[0])).shape[:2]
             cache = VJEPACache(a.vjepa_cache / f"{seq}.npz")
             trained = a.fusion or a.prior
-            if not trained or a.reloc_verify > 0 or a.prior:  # the prior needs the relocalizer's memory
+            if not trained or a.reloc_verify > 0 or a.prior:  # the prior reads the relocalizer's memory
                 params = RelocParams(candidates=max(a.reloc_verify, 1), surprise_gate=a.surprise_gate,
                                      propose=not trained or a.reloc_verify > 0, warning=a.occlusion_warning,
                                      warn_relax=a.warn_relax,

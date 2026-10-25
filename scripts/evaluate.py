@@ -1,11 +1,9 @@
-"""Evaluate tracker outputs on LaSOT: AUC / Precision / Norm. Precision + occlusion recovery.
+"""AUC / Precision / Normalized Precision and occlusion recovery of tracker outputs on LaSOT.
 
-    python scripts/evaluate.py --results data/raw_results/ostrack_official/lasot --name ostrack_official
+    python scripts/evaluate.py --results data/raw_results/ostrack_ours/lasot --name ostrack_ours
     python scripts/evaluate.py --results ... --name ... --sequences configs/splits/dev_occlusion.txt
 
-<results>/<seq>.txt holds one x,y,w,h box per frame (tab or comma separated), as written by
-OSTrack / pytracking and by scripts/run_ostrack_lasot.py. Ground truth comes from data/ (see
-scripts/fetch_lasot_annotations.py). Writes results/<name>/{metrics.json, per_sequence.csv, episodes.csv}.
+Writes results/<name>/{metrics.json, per_sequence.csv, episodes.csv}.
 """
 from __future__ import annotations
 

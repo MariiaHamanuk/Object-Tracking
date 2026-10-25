@@ -1,8 +1,4 @@
-"""Read LaSOT straight from the per-class zips on HuggingFace with HTTP range requests.
-
-Nothing is downloaded except the bytes actually needed, so a single video (or only its
-annotations) can be pulled out of a 2-4 GB class archive.
-"""
+"""Read LaSOT from the per-class zips on HuggingFace with HTTP range requests."""
 from __future__ import annotations
 
 import io
@@ -20,7 +16,7 @@ ANNOT_FILES = ("groundtruth.txt", "full_occlusion.txt", "out_of_view.txt", "nlp.
 
 
 def retry(request, tries: int = 7):
-    """Run an HTTP request, waiting 2, 4, 8, ... s between attempts (survives short network drops)."""
+    """Run an HTTP request with exponential backoff."""
     for t in range(tries):
         try:
             r = request()
@@ -33,7 +29,7 @@ def retry(request, tries: int = 7):
 
 
 class HttpFile(io.RawIOBase):
-    """Read-only seekable file over HTTP range requests, so zipfile can read a remote archive."""
+    """Seekable read-only file over HTTP range requests."""
 
     def __init__(self, url: str, min_block: int = 256 << 10):
         self.session = requests.Session()
@@ -62,7 +58,6 @@ class HttpFile(io.RawIOBase):
         return out
 
     def prefetch(self, first: int, last: int):
-        """Load bytes [first, last] in one request; later reads inside that span hit the cache."""
         self.cache_start, self.cache = first, self._get(first, min(last, self.size - 1))
 
     def _get(self, first, last):
@@ -85,15 +80,14 @@ def frame_names(z: zipfile.ZipFile, seq: str) -> list[str]:
 
 
 def _prefetch(z: zipfile.ZipFile, infos: list[zipfile.ZipInfo]):
-    # a video's frames are stored contiguously: one range request instead of thousands
+    # frames of a video are contiguous in the archive: fetch them with one request
     first = min(i.header_offset for i in infos)
     last = max(i.header_offset + 30 + len(i.orig_filename.encode()) + len(i.extra) + i.compress_size for i in infos)
-    z.fp.prefetch(first, last + 1024)  # margin for local-header extras that differ from the central dir
+    z.fp.prefetch(first, last + 1024)  # local headers can carry more extra bytes than the central directory
 
 
 def extract_frames(z: zipfile.ZipFile, seq: str, indices, out_dir: Path) -> Path:
-    """Write only the given 0-based frames of one video (plus annotations) to out_dir/<seq>/.
-    Frames already on disk are skipped; nearby indices are fetched with a single range request."""
+    """Write the given 0-based frames of one video and its annotations to out_dir/<seq>/."""
     seq_dir = Path(out_dir) / seq
     (seq_dir / "img").mkdir(parents=True, exist_ok=True)
     names = frame_names(z, seq)
@@ -102,7 +96,6 @@ def extract_frames(z: zipfile.ZipFile, seq: str, indices, out_dir: Path) -> Path
             (seq_dir / f).write_bytes(z.read(f"{seq}/{f}"))
     todo = sorted({int(i) for i in indices if 0 <= i < len(names)})
     todo = [i for i in todo if not (seq_dir / "img" / names[i].rsplit("/", 1)[1]).exists()]
-    # group into chunks of nearby frames so one far-away frame does not drag in the whole video
     chunks, cur = [], []
     for i in todo:
         if cur and i - cur[-1] > 64:
@@ -120,7 +113,7 @@ def extract_frames(z: zipfile.ZipFile, seq: str, indices, out_dir: Path) -> Path
 
 
 def extract_sequence(z: zipfile.ZipFile, seq: str, out_dir: Path) -> Path:
-    """Write annotations and all frames of one video to out_dir/<seq>/ (frames fetched in one request)."""
+    """Write annotations and all frames of one video to out_dir/<seq>/."""
     seq_dir = Path(out_dir) / seq
     (seq_dir / "img").mkdir(parents=True, exist_ok=True)
     names = set(z.namelist())
@@ -136,8 +129,7 @@ def extract_sequence(z: zipfile.ZipFile, seq: str, out_dir: Path) -> Path:
 
 
 def stream_sequences(seqs: list[str], work: Path, ahead: int = 2):
-    """Yield (seq, seq_dir, error) while the next videos download in a background thread.
-    At most `ahead` finished videos wait on disk; the consumer deletes each one when done."""
+    """Yield (seq, seq_dir, error) while the next `ahead` videos download in the background."""
     q: queue.Queue = queue.Queue(maxsize=ahead)
 
     def producer():
@@ -146,9 +138,9 @@ def stream_sequences(seqs: list[str], work: Path, ahead: int = 2):
             cls = seq.rsplit("-", 1)[0]
             try:
                 if cls not in zips:
-                    zips = {cls: open_class_zip(cls)}  # keep one archive index in memory
+                    zips = {cls: open_class_zip(cls)}
                 q.put((seq, extract_sequence(zips[cls], seq, work), None))
-            except Exception as e:  # report and move on; a re-run retries it
+            except Exception as e:
                 q.put((seq, None, e))
         q.put(None)
 

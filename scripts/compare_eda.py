@@ -1,6 +1,5 @@
-"""Compare two EDA runs (CSV folders written by src/eda/eda_lasot.ipynb), e.g. person-only vs full LaSOT.
+"""Compare two EDA runs (CSV folders written by src/eda/eda_lasot.ipynb).
 
-    python scripts/compare_eda.py                                  # results/eda_person vs results/eda
     python scripts/compare_eda.py --old results/eda_person --new results/eda --out results/eda/comparison.md
 """
 from __future__ import annotations
